@@ -37,13 +37,15 @@ def init_db():
                 created_at         TEXT NOT NULL,
                 error_message      TEXT,
                 language           TEXT NOT NULL DEFAULT 'auto',
-                detected_language  TEXT
+                detected_language  TEXT,
+                stage              TEXT
             )
             """
         )
         _add_column(conn, "files", "error_message", "TEXT")
         _add_column(conn, "files", "language", "TEXT NOT NULL DEFAULT 'auto'")
         _add_column(conn, "files", "detected_language", "TEXT")
+        _add_column(conn, "files", "stage", "TEXT")
         # Everything processed before multilingual support was English
         conn.execute(
             "UPDATE files SET detected_language = 'en' "

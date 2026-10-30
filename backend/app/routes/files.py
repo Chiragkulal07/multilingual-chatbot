@@ -14,7 +14,7 @@ router = APIRouter(prefix="/api/files", tags=["files"])
 
 FILE_COLUMNS = (
     "file_id, filename, file_type, size_bytes, status, error_message, "
-    "language, detected_language, created_at"
+    "language, detected_language, created_at, stage"
 )
 MEDIA_TYPES = {"jpeg": "image/jpeg", "png": "image/png", "pdf": "application/pdf"}
 
@@ -59,15 +59,15 @@ async def upload_files(
         with get_conn() as conn:
             conn.execute(
                 "INSERT INTO files (file_id, filename, stored_name, file_type, size_bytes, "
-                "status, created_at, language) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                "status, created_at, language, stage) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 (
                     file_id, filename, stored_name, file_type, len(data),
-                    "processing", datetime.now(timezone.utc).isoformat(), language,
+                    "processing", datetime.now(timezone.utc).isoformat(), language, "analyzing",
                 ),
             )
 
         background_tasks.add_task(process_file, file_id)
-        results.append({"file_id": file_id, "filename": filename, "status": "processing"})
+        results.append({"file_id": file_id, "filename": filename, "status": "processing", "stage": "analyzing"})
 
     return {"results": results}
 
@@ -131,12 +131,12 @@ def reprocess_file(file_id: str, background_tasks: BackgroundTasks, language: st
 
     with get_conn() as conn:
         conn.execute(
-            "UPDATE files SET status = 'processing', error_message = NULL, "
+            "UPDATE files SET status = 'processing', stage = 'analyzing', error_message = NULL, "
             "language = COALESCE(?, language) WHERE file_id = ?",
             (language, file_id),
         )
     background_tasks.add_task(process_file, file_id)
-    return {"file_id": file_id, "status": "processing"}
+    return {"file_id": file_id, "status": "processing", "stage": "analyzing"}
 
 
 @router.get("/{file_id}/original")

@@ -28,6 +28,12 @@ export async function listFiles() {
   return data.files;
 }
 
+export async function getFile(fileId) {
+  const res = await fetch(`${API_BASE}/api/files/${fileId}`);
+  if (!res.ok) throw new Error(await parseError(res, "Could not load file"));
+  return res.json();
+}
+
 export async function getPages(fileId) {
   const res = await fetch(`${API_BASE}/api/files/${fileId}/pages`);
   if (!res.ok) throw new Error(await parseError(res, "Could not load extracted text"));
@@ -59,11 +65,16 @@ export async function searchChunks(query, k = 5) {
   return data.results;
 }
 
-export async function askQuestion(question, fileIds, answerLanguage = "auto") {
+export async function askQuestion(question, fileIds = null, answerLanguage = "auto", history = []) {
   const res = await fetch(`${API_BASE}/api/chat`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ question, file_ids: fileIds, answer_language: answerLanguage }),
+    body: JSON.stringify({
+      question,
+      file_ids: fileIds && fileIds.length > 0 ? fileIds : null,
+      answer_language: answerLanguage,
+      history: history.map((h) => ({ role: h.role, content: h.text || h.content || "" })),
+    }),
   });
   if (!res.ok) throw new Error(await parseError(res, "Could not get an answer"));
   return res.json();

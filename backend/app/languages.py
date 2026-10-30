@@ -60,29 +60,33 @@ def looks_garbled(text: str) -> bool:
     )
     indic = sum(1 for c in chars if _is_kn(c) or _is_hi(c))
     ratio = foreign / len(chars)
-    # Mixed with real Indic text, a few stray symbols are already suspicious.
-    # With no Indic text (fully Latin-1 junk), require a larger share.
     return ratio > 0.03 if indic else ratio > 0.25
 
 
 MESSAGES = {
     "not_enough_info": {
-        "en": "The uploaded documents do not contain enough information to answer this question.",
-        "hi": "अपलोड किए गए दस्तावेज़ों में इस प्रश्न का उत्तर देने के लिए पर्याप्त जानकारी नहीं है।",
-        "kn": "ಅಪ್ಲೋಡ್ ಮಾಡಿದ ದಾಖಲೆಗಳಲ್ಲಿ ಈ ಪ್ರಶ್ನೆಗೆ ಉತ್ತರಿಸಲು ಸಾಕಷ್ಟು ಮಾಹಿತಿ ಇಲ್ಲ.",
+        "en": "I couldn't find that information in the uploaded document.",
+        "hi": "मुझे अपलोड किए गए दस्तावेज़ में यह जानकारी नहीं मिली।",
+        "kn": "ಅಪ್ಲೋಡ್ ಮಾಡಿದ ದಾಖಲೆಯಲ್ಲಿ ಈ ಮಾಹಿತಿ ನನಗೆ ಕಂಡುಬಂದಿಲ್ಲ.",
+    },
+    "greeting_doc": {
+        "en": "Hello! I'm ready to help you with your document. What would you like to know?",
+        "hi": "नमस्ते! मैं आपके दस्तावेज़ में आपकी सहायता के लिए तैयार हूँ। आप क्या जानना चाहते हैं?",
+        "kn": "ನಮಸ್ಕಾರ! ನಿಮ್ಮ ದಾಖಲೆಯ ಕುರಿತು ಸಹಾಯ ಮಾಡಲು ನಾನು ಸಿದ್ಧನಾಗಿದ್ದೇನೆ. ನೀವು ಏನನ್ನು ತಿಳಿಯಲು ಬಯಸುತ್ತೀರಿ?",
     },
     "no_documents": {
-        "en": "There are no processed documents to search yet. Upload a file and wait until it is ready.",
-        "hi": "अभी तक कोई दस्तावेज़ प्रोसेस नहीं हुआ है। कोई फ़ाइल अपलोड करें और उसके तैयार होने तक प्रतीक्षा करें।",
-        "kn": "ಇನ್ನೂ ಯಾವುದೇ ದಾಖಲೆ ಪ್ರಕ್ರಿಯೆಗೊಂಡಿಲ್ಲ. ಫೈಲ್ ಅಪ್ಲೋಡ್ ಮಾಡಿ ಮತ್ತು ಅದು ಸಿದ್ಧವಾಗುವವರೆಗೆ ಕಾಯಿರಿ.",
+        "en": "No document is currently attached. You can ask any general question or attach a file to analyze it.",
+        "hi": "वर्तमान में कोई दस्तावेज़ संलग्न नहीं है। आप कोई भी सामान्य प्रश्न पूछ सकते हैं या उसका विश्लेषण करने के लिए एक फ़ाइल संलग्न कर सकते हैं।",
+        "kn": "ಪ್ರಸ್ತುತ ಯಾವುದೇ ದಾಖಲೆಯನ್ನು ಲಗತ್ತಿಸಲಾಗಿಲ್ಲ. ನೀವು ಯಾವುದೇ ಸಾಮಾನ್ಯ ಪ್ರಶ್ನೆಯನ್ನು ಕೇಳಬಹುದು ಅಥವಾ ಅದನ್ನು ವಿಶ್ಲೇಷಿಸಲು ಫೈಲ್ ಲಗತ್ತಿಸಬಹುದು.",
     },
     "daily_limit": {
-        "en": "This app's daily AI request limit has been reached. Showing the most relevant passages instead.",
-        "hi": "इस ऐप की दैनिक AI अनुरोध सीमा पूरी हो गई है। इसके बजाय सबसे प्रासंगिक अंश दिखाए जा रहे हैं।",
-        "kn": "ಈ ಆ್ಯಪ್‌ನ ದೈನಂದಿನ AI ವಿನಂತಿ ಮಿತಿ ತಲುಪಿದೆ. ಬದಲಿಗೆ ಅತ್ಯಂತ ಸಂಬಂಧಿತ ಭಾಗಗಳನ್ನು ತೋರಿಸಲಾಗುತ್ತಿದೆ.",
+        "en": "Daily request limit reached. Please try again tomorrow.",
+        "hi": "दैनिक अनुरोध सीमा समाप्त हो गई है। कृपया कल पुनः प्रयास करें।",
+        "kn": "ದೈನಂದಿನ ಮಿತಿ ಮೀರಿದೆ. ದಯವಿಟ್ಟು ನಾಳೆ ಮತ್ತೆ ಪ್ರಯತ್ನಿಸಿ.",
     },
 }
 
 
 def message(key: str, lang: str) -> str:
-    return MESSAGES[key].get(lang) or MESSAGES[key]["en"]
+    msg_dict = MESSAGES.get(key, MESSAGES["not_enough_info"])
+    return msg_dict.get(lang) or msg_dict.get("en") or ""

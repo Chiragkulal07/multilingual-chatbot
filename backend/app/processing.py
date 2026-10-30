@@ -14,12 +14,18 @@ logger = logging.getLogger("processing")
 _extraction_lock = threading.Lock()
 
 
-def set_status(file_id: str, status: str, error: str | None = None) -> None:
+def set_status(file_id: str, status: str, error: str | None = None, stage: str | None = None) -> None:
     with get_conn() as conn:
-        conn.execute(
-            "UPDATE files SET status = ?, error_message = ? WHERE file_id = ?",
-            (status, error, file_id),
-        )
+        if stage:
+            conn.execute(
+                "UPDATE files SET status = ?, error_message = ?, stage = ? WHERE file_id = ?",
+                (status, error, stage, file_id),
+            )
+        else:
+            conn.execute(
+                "UPDATE files SET status = ?, error_message = ? WHERE file_id = ?",
+                (status, error, file_id),
+            )
 
 
 def _insert_chunks(conn, chunks: list[dict]) -> None:
@@ -46,23 +52,24 @@ def process_file(file_id: str) -> None:
         return
 
     try:
+        set_status(file_id, "processing", stage="analyzing")
         with _extraction_lock:
+            set_status(file_id, "processing", stage="extracting")
             pages = extract_file(UPLOAD_DIR / row["stored_name"], row["file_type"], row["language"])
 
         if not any(p["text"] for p in pages):
-            set_status(file_id, "failed", "No readable text was found in this file.")
+            set_status(file_id, "failed", "No readable text was found in this file.", stage="failed")
             return
 
         chunks = chunk_pages(file_id, pages)
         if not chunks:
-            set_status(file_id, "failed", "No readable text was found in this file.")
+            set_status(file_id, "failed", "No readable text was found in this file.", stage="failed")
             return
 
         langs = [p["language"] for p in pages if p["text"]]
         detected = max(set(langs), key=langs.count) if langs else "en"
 
-        # One vector per provider. A provider that is down is skipped (it catches up later);
-        # the file only fails if EVERY provider fails.
+        set_status(file_id, "processing", stage="preparing_context")
         vectors_by_provider = embed_all([c["text"] for c in chunks])
 
         with commit_lock:
@@ -96,7 +103,7 @@ def process_file(file_id: str) -> None:
                     )
                     _insert_chunks(conn, chunks)
                     conn.execute(
-                        "UPDATE files SET status = 'ready', error_message = NULL, "
+                        "UPDATE files SET status = 'ready', stage = 'ready', error_message = NULL, "
                         "detected_language = ? WHERE file_id = ?",
                         (detected, file_id),
                     )
@@ -108,7 +115,7 @@ def process_file(file_id: str) -> None:
             vector_store.remove_everywhere(old_ids)  # reprocessing: drop the previous vectors
     except Exception as e:
         logger.exception("Processing failed for %s", file_id)
-        set_status(file_id, "failed", f"Processing failed: {e}")
+        set_status(file_id, "failed", f"Processing failed: {e}", stage="failed")
 
 
 def backfill_chunks() -> None:
@@ -200,7 +207,7 @@ def recover_interrupted() -> None:
     """If the server stopped mid-job, don't leave files stuck on 'processing'."""
     with get_conn() as conn:
         conn.execute(
-            "UPDATE files SET status = 'failed', "
+            "UPDATE files SET status = 'failed', stage = 'failed', "
             "error_message = 'Processing was interrupted by a server restart. Use reprocess.' "
             "WHERE status = 'processing'"
         )
