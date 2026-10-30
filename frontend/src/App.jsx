@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { askQuestion, getFile, listFiles, originalUrl, reprocessFile, uploadFiles } from "./api";
+import { renderMarkdown } from "./markdown.jsx";
 import "./App.css";
 
 const ALLOWED_EXT = [".jpg", ".jpeg", ".png", ".pdf"];
@@ -21,16 +22,117 @@ function formatSize(bytes) {
   return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
 }
 
-// Map backend stages to human-readable stage labels
-const STAGE_LABELS = {
-  uploading: { label: "Uploading file…", step: 1 },
-  analyzing_img: { label: "Analyzing image…", step: 2 },
-  analyzing_doc: { label: "Reading document…", step: 2 },
-  extracting: { label: "Extracting content…", step: 3 },
-  preparing_context: { label: "Preparing document context…", step: 4 },
-  ready: { label: "Document ready", step: 5 },
-  failed: { label: "Processing failed", step: 0 },
-};
+const THINK_PHASES_DOC = [
+  "Reading the document",
+  "Finding relevant passages",
+  "Cross-checking details",
+  "Composing the answer",
+];
+const THINK_PHASES_CHAT = ["Understanding the question", "Reasoning it through", "Composing the answer"];
+
+function AssistantMark({ thinking = false }) {
+  return (
+    <div className={`assistant-avatar ${thinking ? "is-thinking" : ""}`} aria-hidden="true">
+      {thinking ? (
+        <>
+          <span className="orbit orbit-a"></span>
+          <span className="orbit orbit-b"></span>
+          <span className="orbit orbit-c"></span>
+          <span className="orbit-core"></span>
+        </>
+      ) : (
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round">
+          <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z" />
+          <polyline points="14 2 14 8 20 8" />
+          <line x1="8" y1="13" x2="16" y2="13" />
+          <line x1="8" y1="17" x2="13" y2="17" />
+        </svg>
+      )}
+    </div>
+  );
+}
+
+// Reveals a finished answer progressively, like a streamed response.
+function StreamedText({ text, animate, onTick, onDone }) {
+  const [shown, setShown] = useState(animate ? 0 : text.length);
+  const done = shown >= text.length;
+
+  useEffect(() => {
+    if (!animate || done) return undefined;
+    const total = text.length;
+    // Total reveal time scales with length but stays between 0.6s and 3.2s.
+    const duration = Math.min(3200, Math.max(600, total * 14));
+    let start = null;
+    let frame;
+    const step = (now) => {
+      if (start === null) start = now;
+      const progress = Math.min(1, (now - start) / duration);
+      // Ease-out so the tail lands softly.
+      const eased = 1 - Math.pow(1 - progress, 1.6);
+      setShown(Math.floor(eased * total));
+      onTick?.();
+      if (progress < 1) frame = requestAnimationFrame(step);
+      else onDone?.();
+    };
+    frame = requestAnimationFrame(step);
+    return () => cancelAnimationFrame(frame);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [animate, text]);
+
+  const visible = done ? text : text.slice(0, shown);
+  return (
+    <div className={`assistant-text-content ${done ? "" : "is-streaming"}`}>
+      {renderMarkdown(visible)}
+    </div>
+  );
+}
+
+function ThinkingIndicator({ hasDocument }) {
+  const phases = hasDocument ? THINK_PHASES_DOC : THINK_PHASES_CHAT;
+  const [phase, setPhase] = useState(0);
+
+  useEffect(() => {
+    const timer = setInterval(() => {
+      setPhase((p) => Math.min(p + 1, phases.length - 1));
+    }, 1700);
+    return () => clearInterval(timer);
+  }, [phases.length]);
+
+  return (
+    <div className="message-turn assistant-turn thinking-turn" role="status" aria-live="polite">
+      <AssistantMark thinking />
+      <div className="assistant-body thinking-body">
+        <div className="thinking-track">
+          <span className="thinking-track-runner"></span>
+        </div>
+        <div className="thinking-status">
+          <span key={phase} className="thinking-phase">
+            {phases[phase]}
+          </span>
+          <span className="thinking-ellipsis">
+            <i></i>
+            <i></i>
+            <i></i>
+          </span>
+        </div>
+        <div className="thinking-steps">
+          {phases.map((label, i) => (
+            <span
+              key={label}
+              className={`thinking-step ${i < phase ? "is-done" : ""} ${i === phase ? "is-active" : ""}`}
+              title={label}
+            ></span>
+          ))}
+        </div>
+        <div className="thinking-skeleton">
+          <span style={{ width: "94%" }}></span>
+          <span style={{ width: "81%" }}></span>
+          <span style={{ width: "62%" }}></span>
+        </div>
+      </div>
+    </div>
+  );
+}
 
 export default function App() {
   const [messages, setMessages] = useState([]);
@@ -198,7 +300,7 @@ export default function App() {
                         id: fileId,
                         detected_language: detail.detected_language,
                       },
-                      text: `I've analyzed and indexed **${file.name}**. You can now ask questions about this document.`,
+                      text: `${file.name} has been analyzed and indexed. You can now ask questions about it.`,
                     }
                   : m
               )
@@ -298,7 +400,7 @@ export default function App() {
                     stage: "ready",
                     stageText: "Document ready",
                     isFileAttached: true,
-                    text: `Successfully reprocessed **${filename}**. You can now ask questions about it.`,
+                    text: `${filename} has been reprocessed. You can now ask questions about it.`,
                   }
                 : m
             )
@@ -379,6 +481,7 @@ export default function App() {
           sources: res.sources || [],
           fromDocuments: res.from_documents,
           cached: res.cached,
+          animate: true,
         },
       ]);
     } catch (e) {
@@ -433,23 +536,40 @@ export default function App() {
       {/* Left Sidebar for Document Library & History */}
       <aside className={`chat-sidebar ${sidebarOpen ? "sidebar-open" : ""}`}>
         <div className="sidebar-header">
-          <button className="new-chat-btn" onClick={handleNewChat}>
-            <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
-              <line x1="12" y1="5" x2="12" y2="19" />
-              <line x1="5" y1="12" x2="19" y2="12" />
-            </svg>
-            <span>New Chat</span>
-          </button>
-          <button className="sidebar-close-btn" onClick={() => setSidebarOpen(false)} title="Close Sidebar">
-            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+          <div className="brand">
+            <span className="brand-mark" aria-hidden="true">
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round">
+                <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z" />
+                <polyline points="14 2 14 8 20 8" />
+                <line x1="8" y1="13" x2="16" y2="13" />
+                <line x1="8" y1="17" x2="13" y2="17" />
+              </svg>
+            </span>
+            <span className="brand-name">DocuSense</span>
+          </div>
+          <button className="sidebar-close-btn" onClick={() => setSidebarOpen(false)} title="Close sidebar">
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
               <line x1="18" y1="6" x2="6" y2="18" />
               <line x1="6" y1="6" x2="18" y2="18" />
             </svg>
           </button>
         </div>
 
+        <div className="sidebar-actions">
+          <button className="new-chat-btn" onClick={handleNewChat}>
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round">
+              <line x1="12" y1="5" x2="12" y2="19" />
+              <line x1="5" y1="12" x2="19" y2="12" />
+            </svg>
+            <span>New chat</span>
+          </button>
+        </div>
+
         <div className="sidebar-content">
-          <div className="sidebar-section-title">Documents</div>
+          <div className="sidebar-section-title">
+            <span>Documents</span>
+            {allFiles.length > 0 && <span className="sidebar-count">{allFiles.length}</span>}
+          </div>
           {allFiles.length === 0 ? (
             <p className="sidebar-empty">No documents uploaded yet.</p>
           ) : (
@@ -487,9 +607,9 @@ export default function App() {
         <header className="chat-navbar">
           <div className="navbar-left">
             <button
-              className="nav-icon-btn"
+              className="nav-icon-btn sidebar-toggle"
               onClick={() => setSidebarOpen(!sidebarOpen)}
-              title="Toggle Sidebar"
+              title="Toggle sidebar"
             >
               <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
                 <line x1="3" y1="12" x2="21" y2="12" />
@@ -518,7 +638,7 @@ export default function App() {
                   </button>
                 </span>
               ) : (
-                "Chat"
+                <span className="navbar-context">General chat · no document attached</span>
               )}
             </span>
           </div>
@@ -536,10 +656,10 @@ export default function App() {
               <option value="kn">ಕನ್ನಡ (Kannada)</option>
             </select>
 
-            <button className="nav-new-chat-btn" onClick={handleNewChat} title="New Chat">
-              <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
-                <line x1="12" y1="5" x2="12" y2="19" />
-                <line x1="5" y1="12" x2="19" y2="12" />
+            <button className="nav-new-chat-btn" onClick={handleNewChat} title="New chat">
+              <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                <path d="M12 20h9" />
+                <path d="M16.5 3.5a2.1 2.1 0 0 1 3 3L7 19l-4 1 1-4Z" />
               </svg>
             </button>
           </div>
@@ -550,42 +670,83 @@ export default function App() {
           <div className="chat-thread-inner">
             {messages.length === 0 ? (
               <div className="chat-empty-state">
-                <h1 className="empty-heading">What would you like to know?</h1>
+                <div className="empty-mark" aria-hidden="true">
+                  <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
+                    <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z" />
+                    <polyline points="14 2 14 8 20 8" />
+                    <line x1="8" y1="13" x2="16" y2="13" />
+                    <line x1="8" y1="17" x2="13" y2="17" />
+                  </svg>
+                </div>
+                <h1 className="empty-heading">Ask about your documents</h1>
                 <p className="empty-subheading">
-                  Chat naturally, or attach an image or PDF to ask questions about your documents.
+                  Attach a PDF or image to ask questions about its contents, or start a conversation without one.
                 </p>
 
                 <div className="empty-suggestions-grid">
                   <button
                     className="suggestion-box"
-                    onClick={() => handleSend("What is the capital of Karnataka and what is it known for?")}
-                  >
-                    <span className="suggestion-text">What is the capital of Karnataka?</span>
-                    <span className="suggestion-category">General chat</span>
-                  </button>
-
-                  <button
-                    className="suggestion-box"
                     onClick={() => fileInputRef.current?.click()}
                   >
-                    <span className="suggestion-text">Attach an image or PDF</span>
-                    <span className="suggestion-category">Upload document</span>
+                    <span className="suggestion-icon">
+                      <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                        <path d="M21.44 11.05l-9.19 9.19a6 6 0 0 1-8.49-8.49l9.19-9.19a4 4 0 0 1 5.66 5.66l-9.2 9.19a2 2 0 0 1-2.83-2.83l8.49-8.48" />
+                      </svg>
+                    </span>
+                    <span className="suggestion-copy">
+                      <span className="suggestion-text">Attach an image or PDF</span>
+                      <span className="suggestion-category">Upload a document</span>
+                    </span>
                   </button>
 
                   <button
                     className="suggestion-box"
                     onClick={() => handleSend("Summarize the key information in this document")}
                   >
-                    <span className="suggestion-text">Summarize key document points</span>
-                    <span className="suggestion-category">Document analysis</span>
+                    <span className="suggestion-icon">
+                      <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                        <line x1="4" y1="6" x2="20" y2="6" />
+                        <line x1="4" y1="12" x2="16" y2="12" />
+                        <line x1="4" y1="18" x2="12" y2="18" />
+                      </svg>
+                    </span>
+                    <span className="suggestion-copy">
+                      <span className="suggestion-text">Summarize the key points</span>
+                      <span className="suggestion-category">Document analysis</span>
+                    </span>
                   </button>
 
                   <button
                     className="suggestion-box"
                     onClick={() => handleSend("Extract all dates, figures, and amounts")}
                   >
-                    <span className="suggestion-text">Extract all dates and numbers</span>
-                    <span className="suggestion-category">Information extraction</span>
+                    <span className="suggestion-icon">
+                      <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                        <rect x="3" y="4" width="18" height="18" rx="2" />
+                        <line x1="16" y1="2" x2="16" y2="6" />
+                        <line x1="8" y1="2" x2="8" y2="6" />
+                        <line x1="3" y1="10" x2="21" y2="10" />
+                      </svg>
+                    </span>
+                    <span className="suggestion-copy">
+                      <span className="suggestion-text">Extract dates, figures and amounts</span>
+                      <span className="suggestion-category">Information extraction</span>
+                    </span>
+                  </button>
+
+                  <button
+                    className="suggestion-box"
+                    onClick={() => handleSend("What is the capital of Karnataka and what is it known for?")}
+                  >
+                    <span className="suggestion-icon">
+                      <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                        <path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z" />
+                      </svg>
+                    </span>
+                    <span className="suggestion-copy">
+                      <span className="suggestion-text">What is the capital of Karnataka?</span>
+                      <span className="suggestion-category">General chat</span>
+                    </span>
                   </button>
                 </div>
               </div>
@@ -620,7 +781,8 @@ export default function App() {
 
                   return (
                     <div key={m.id} className="message-turn assistant-turn">
-                      <div className="bubble assistant-bubble file-process-bubble">
+                      <AssistantMark />
+                      <div className="assistant-body file-process-bubble">
                         {/* 1. Image Preview with Active Laser Scanning Effect */}
                         {isImg ? (
                           <div className={`scan-card-image-wrap ${isScanning ? "is-scanning" : ""} ${isDone ? "is-ready" : ""}`}>
@@ -751,8 +913,27 @@ export default function App() {
                 // Assistant Regular Message
                 return (
                   <div key={m.id} className="message-turn assistant-turn">
-                    <div className={`bubble assistant-bubble ${m.isError ? "error-bubble" : ""}`}>
-                      <div className="assistant-text-content">{m.text}</div>
+                    <AssistantMark />
+                    <div className={`assistant-body ${m.isError ? "error-body" : ""}`}>
+                      {m.isError && (
+                        <div className="error-label">
+                          <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round">
+                            <circle cx="12" cy="12" r="10" />
+                            <line x1="12" y1="8" x2="12" y2="12" />
+                            <line x1="12" y1="16" x2="12.01" y2="16" />
+                          </svg>
+                          <span>Something went wrong</span>
+                        </div>
+                      )}
+                      {m.isError ? (
+                        <div className="assistant-text-content">{m.text}</div>
+                      ) : (
+                        <StreamedText
+                          text={m.text || ""}
+                          animate={Boolean(m.animate)}
+                          onTick={() => messagesEndRef.current?.scrollIntoView({ block: "end" })}
+                        />
+                      )}
 
                       {/* Optional Collapsed Citations */}
                       {m.sources && m.sources.length > 0 && (
@@ -824,16 +1005,7 @@ export default function App() {
             )}
 
             {/* Answer Generating Thinking State */}
-            {loading && (
-              <div className="message-turn assistant-turn">
-                <div className="bubble assistant-bubble thinking-bubble">
-                  <div className="thinking-row">
-                    <span className="thinking-spinner"></span>
-                    <span className="thinking-label">Thinking…</span>
-                  </div>
-                </div>
-              </div>
-            )}
+            {loading && <ThinkingIndicator hasDocument={Boolean(activeFile)} />}
 
             <div ref={messagesEndRef} />
           </div>
@@ -923,7 +1095,7 @@ export default function App() {
           </div>
 
           <div className="input-footer-text">
-            Attach PDFs or images directly in chat. Ask questions to query document content or chat freely.
+            <kbd>Enter</kbd> to send · <kbd>Shift</kbd> + <kbd>Enter</kbd> for a new line · PDF, PNG, JPG up to 10 MB
           </div>
         </div>
       </div>

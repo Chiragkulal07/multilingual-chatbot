@@ -5,7 +5,7 @@ from openai import OpenAI
 
 load_dotenv()  # reads backend/.env, so you don't need to set the key by hand
 
-client = OpenAI(api_key=os.getenv("k-proj-nx7A4y1NkIfH23erPGYGzhK2IIHSH_eu2DOZaXEniR98_Mf7VajeV2u60BRJgMKb-tNGLiABqcT3BlbkFJoInnJOQEDetx9bAhS2lbSPFRxuV1bC4KSt3vAMX5KP-25uZvcGMw5nl0fII4yVREenPUF4zJsA"))
+client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
 model = os.getenv("OPENAI_LLM_MODEL", "gpt-6-luna")
 
 # Chat test

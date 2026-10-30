@@ -217,6 +217,29 @@ def _gemini_general_attempt(model: str, prompt: str, system: str) -> dict:
         raise _Fail(f"unusable answer: {e}")
 
 
+# Some OpenAI models (reasoning-style ones) only accept the default temperature.
+# Once a model rejects a custom temperature we remember it and stop sending one.
+_openai_temperature_unsupported = False
+
+
+def _openai_chat_completion(client, **kwargs):
+    """Call chat.completions.create, retrying once without `temperature` if the model rejects it."""
+    global _openai_temperature_unsupported
+    import openai
+
+    if _openai_temperature_unsupported:
+        kwargs.pop("temperature", None)
+    try:
+        return client.chat.completions.create(**kwargs)
+    except openai.BadRequestError as e:
+        if "temperature" in kwargs and "temperature" in str(e).lower():
+            logger.info("OpenAI model %s does not accept a custom temperature; retrying without it", kwargs.get("model"))
+            _openai_temperature_unsupported = True
+            kwargs.pop("temperature", None)
+            return client.chat.completions.create(**kwargs)
+        raise
+
+
 def _openai_doc_attempt(system: str, prompt: str, num_chunks: int, answer_lang: str) -> dict:
     try:
         client = _get_openai_client()
@@ -230,7 +253,8 @@ def _openai_doc_attempt(system: str, prompt: str, num_chunks: int, answer_lang: 
         '"sources_used" (array of integers).'
     )
     try:
-        response = client.chat.completions.create(
+        response = _openai_chat_completion(
+            client,
             model=OPENAI_LLM_MODEL,
             messages=[
                 {"role": "system", "content": system + json_hint},
@@ -258,7 +282,8 @@ def _openai_general_attempt(system: str, prompt: str) -> dict:
     import openai
 
     try:
-        response = client.chat.completions.create(
+        response = _openai_chat_completion(
+            client,
             model=OPENAI_LLM_MODEL,
             messages=[
                 {"role": "system", "content": system},
@@ -340,4 +365,8 @@ def generate_answer(
         raise LLMError("Rate limit reached. Please wait a minute and try again.", 429)
     if code == 504:
         raise LLMError("The language model timed out. Please try again.", 504)
+    if code == 400:
+        # Surface the provider's own explanation (first line only) so misconfigurations are visible.
+        detail = str(last).splitlines()[0][:200] if last else ""
+        raise LLMError(f"The language model rejected the request: {detail}", 502)
     raise LLMError("Could not get an answer from the language model. Please try again.", 502)
