@@ -36,10 +36,14 @@ export default function App() {
       const data = await listFiles();
       setFiles(data);
       setBackendDown(false);
+      // Auto-select first file if none is selected
+      if (!selectedId && data.length > 0) {
+        setSelectedId(data[0].file_id);
+      }
     } catch {
       setBackendDown(true);
     }
-  }, []);
+  }, [selectedId]);
 
   useEffect(() => {
     refresh();
@@ -55,7 +59,6 @@ export default function App() {
   const handleSelect = useCallback((fileId, page, chunkText) => {
     setSelectedId(fileId);
     setFocus(page ? { page, chunkText: chunkText || null } : null);
-    // On small screens, auto-switch to inspector when selecting
     if (window.innerWidth <= 992) {
       setMobileView("inspector");
     }
@@ -100,148 +103,138 @@ export default function App() {
     refresh();
   };
 
-  const selectedFile = files.find((f) => f.file_id === selectedId) || null;
+  const selectedFile = files.find((f) => f.file_id === selectedId) || files[0] || null;
   const readyFiles = files.filter((f) => f.status === "ready");
 
   return (
-    <div className="app-shell">
-      {/* Top Application Header */}
-      <header className="app-header">
-        <div className="header-left">
-          <div className="brand-emblem">
-            <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-              <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z" />
-              <polyline points="14 2 14 8 20 8" />
-              <path d="M10 13l2 2 4-4" />
+    <div className="docusense-app-shell">
+      {/* Top Header Matching Screenshot */}
+      <header className="docusense-top-nav">
+        <div className="nav-left">
+          <button className="nav-hamburger-btn" title="Toggle Navigation">
+            <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+              <line x1="3" y1="12" x2="21" y2="12" />
+              <line x1="3" y1="6" x2="21" y2="6" />
+              <line x1="3" y1="18" x2="21" y2="18" />
             </svg>
-          </div>
-          <div className="brand-info">
-            <div className="brand-title-row">
-              <h1 className="brand-title">DocuSense AI</h1>
-              <span className="brand-version-tag">Studio</span>
+          </button>
+
+          <div className="nav-brand-group">
+            <div className="nav-brand-logo">
+              <svg width="18" height="18" viewBox="0 0 24 24" fill="none">
+                <path
+                  d="M12 2L14.2 9.8L22 12L14.2 14.2L12 22L9.8 14.2L2 12L9.8 9.8L12 2Z"
+                  fill="#ffffff"
+                />
+              </svg>
             </div>
-            <p className="brand-desc">Multilingual OCR & Document Intelligence (EN • HI • KN)</p>
+            <div className="nav-brand-titles">
+              <div className="brand-logo-text">
+                DocuSense <span className="brand-ai-terracotta">AI</span>
+              </div>
+              <div className="brand-sub-tag">Multilingual OCR & Document Intelligence</div>
+            </div>
           </div>
         </div>
 
-        {/* Center Workspace Navigation Tabs */}
-        <div className="workspace-tabs">
+        {/* Center Mode Switcher Tabs */}
+        <div className="nav-center-tabs">
           <button
-            className={`workspace-tab-btn ${centerTab === "chat" ? "active" : ""}`}
+            className={`nav-mode-pill ${centerTab === "chat" ? "active-terracotta-pill" : ""}`}
             onClick={() => setCenterTab("chat")}
           >
-            <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
               <path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z" />
             </svg>
             <span>Document Q&A</span>
-            {readyFiles.length > 0 && (
-              <span className="tab-counter-badge">{readyFiles.length}</span>
-            )}
           </button>
 
           <button
-            className={`workspace-tab-btn ${centerTab === "retrieval" ? "active" : ""}`}
+            className={`nav-mode-pill ${centerTab === "retrieval" ? "active-terracotta-pill" : ""}`}
             onClick={() => setCenterTab("retrieval")}
           >
-            <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
-              <circle cx="11" cy="11" r="8" />
-              <line x1="21" y1="21" x2="16.65" y2="16.65" />
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+              <circle cx="12" cy="12" r="3" />
+              <path d="M12 2v3M12 19v3M2 12h3M19 12h3M4.93 4.93l2.12 2.12M16.95 16.95l2.12 2.12M4.93 19.07l2.12-2.12M16.95 7.05l2.12-2.12" />
             </svg>
             <span>Vector Explorer</span>
           </button>
         </div>
 
-        {/* Header Right Status Badges */}
-        <div className="header-right">
-          <div className={`status-pill ${backendDown ? "status-offline" : "status-online"}`}>
-            <span className="pulse-dot"></span>
-            <span>{backendDown ? "Backend Offline" : "API Connected"}</span>
+        {/* Right Status Group */}
+        <div className="nav-right-group">
+          <div className={`api-status-pill ${backendDown ? "offline" : "online"}`}>
+            <span className="api-dot"></span>
+            <span>{backendDown ? "API Offline" : "API Connected"}</span>
           </div>
 
-          <div className="doc-count-pill" title={`${files.length} Total Uploaded Documents`}>
+          <div className="docs-count-badge">
             <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
               <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z" />
               <polyline points="14 2 14 8 20 8" />
             </svg>
-            <span>{files.length} {files.length === 1 ? "Doc" : "Docs"}</span>
+            <span>{files.length} Docs</span>
           </div>
+
+          <button className="user-avatar-btn" title="User Settings">
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+              <path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2" />
+              <circle cx="12" cy="7" r="4" />
+            </svg>
+          </button>
         </div>
       </header>
 
-      {/* Mobile/Tablet View Switcher Bar */}
-      <div className="mobile-nav-bar">
+      {/* Responsive Breakpoint Switcher */}
+      <div className="responsive-mobile-bar">
         <button
-          className={`mobile-tab-btn ${mobileView === "sidebar" ? "active" : ""}`}
+          className={`mobile-bar-btn ${mobileView === "sidebar" ? "active" : ""}`}
           onClick={() => setMobileView("sidebar")}
         >
           Documents ({files.length})
         </button>
         <button
-          className={`mobile-tab-btn ${mobileView === "chat" ? "active" : ""}`}
+          className={`mobile-bar-btn ${mobileView === "chat" ? "active" : ""}`}
           onClick={() => setMobileView("chat")}
         >
-          {centerTab === "chat" ? "Assistant" : "Search"}
+          {centerTab === "chat" ? "Assistant" : "Explorer"}
         </button>
         <button
-          className={`mobile-tab-btn ${mobileView === "inspector" ? "active" : ""}`}
+          className={`mobile-bar-btn ${mobileView === "inspector" ? "active" : ""}`}
           onClick={() => setMobileView("inspector")}
         >
-          Viewer {selectedFile ? `(${selectedFile.file_type.toUpperCase()})` : ""}
+          Viewer
         </button>
       </div>
 
-      {/* Main 3-Column Studio Layout */}
-      <main className={`studio-layout show-mobile-${mobileView}`}>
-        {/* Column 1: Document Management Sidebar */}
-        <aside className="studio-col studio-sidebar">
-          <div className="sidebar-scrollable">
+      {/* Main 3-Column Studio Workspace */}
+      <main className={`docusense-main-studio show-${mobileView}`}>
+        {/* Column 1: Left Document Management Sidebar */}
+        <aside className="studio-sidebar-column">
+          <div className="sidebar-inner-content">
             <UploadArea onFiles={handleFiles} disabled={uploading} />
 
-            {backendDown && (
-              <div className="alert-card alert-danger">
-                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
-                  <circle cx="12" cy="12" r="10" />
-                  <line x1="12" y1="8" x2="12" y2="12" />
-                  <line x1="12" y1="16" x2="12.01" y2="16" />
-                </svg>
-                <span>Cannot connect to backend server. Make sure it is running on <code>http://localhost:8000</code>.</span>
-              </div>
-            )}
-
             {error && (
-              <div className="alert-card alert-danger">
+              <div className="sidebar-error-toast">
                 <span>{error}</span>
               </div>
             )}
 
             {results.length > 0 && (
-              <div className="upload-results-box">
-                <div className="results-header">
-                  <span className="results-title">Upload Status</span>
-                  <button className="dismiss-btn" onClick={() => setResults([])}>
-                    Dismiss
+              <div className="sidebar-results-toast">
+                <div className="results-toast-top">
+                  <span>Upload Results</span>
+                  <button className="results-dismiss" onClick={() => setResults([])}>
+                    ✕
                   </button>
                 </div>
-                <ul className="results-list">
-                  {results.map((r, i) => (
-                    <li
-                      key={i}
-                      className={`result-item ${r.status === "rejected" ? "result-rejected" : "result-uploaded"}`}
-                    >
-                      <strong className="result-name">{r.filename}</strong>
-                      <span className="result-msg">
-                        {r.status === "rejected" ? ` — ${r.error}` : " — uploaded & queuing for OCR…"}
-                      </span>
-                    </li>
-                  ))}
-                </ul>
+                {results.map((r, i) => (
+                  <div key={i} className={`toast-row ${r.status}`}>
+                    <strong>{r.filename}</strong>: {r.status === "rejected" ? r.error : "processing…"}
+                  </div>
+                ))}
               </div>
             )}
-
-            <div className="sidebar-section-header">
-              <span className="section-label">Uploaded Documents</span>
-              <span className="section-badge">{files.length}</span>
-            </div>
 
             <FileList
               files={files}
@@ -252,8 +245,8 @@ export default function App() {
           </div>
         </aside>
 
-        {/* Column 2: Conversational QA / Retrieval Explorer Workspace */}
-        <section className="studio-col studio-center">
+        {/* Column 2: Center Conversational Assistant / Explorer */}
+        <section className="studio-center-column">
           {centerTab === "chat" ? (
             <Chat files={readyFiles} onSelectFile={handleSelect} />
           ) : (
@@ -261,8 +254,8 @@ export default function App() {
           )}
         </section>
 
-        {/* Column 3: Document Inspector & Source Viewer */}
-        <section className="studio-col studio-inspector">
+        {/* Column 3: Right Document Inspector */}
+        <section className="studio-inspector-column">
           <TextPreview file={selectedFile} focus={focus} onReread={handleRetry} />
         </section>
       </main>
