@@ -7,6 +7,7 @@ import time
 import faiss
 import numpy as np
 
+from app.tracing import traceable
 from app.config import EMBEDDING_DIM, EMBEDDING_PROVIDERS, FAISS_INDEX_PATH
 
 _lock = threading.RLock()
@@ -74,6 +75,7 @@ def remove_everywhere(ids: list[int]) -> None:
         remove(provider, ids)
 
 
+@traceable(name="faiss_search", run_type="tool", process_inputs=lambda d: {k: v for k, v in d.items() if k != "query_vector"})
 def search(provider: str, query_vector: np.ndarray, k: int) -> list[tuple[int, float]]:
     """Returns [(vector_id, similarity), ...] best first."""
     with _lock:

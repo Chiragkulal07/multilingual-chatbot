@@ -8,14 +8,17 @@ os.environ.setdefault("PADDLE_PDX_DISABLE_MODEL_SOURCE_CHECK", "True")
 import numpy as np
 import pymupdf  # PyMuPDF
 
+from app.tracing import annotate, compact, traceable
 from app.languages import PADDLE_LANG, detect_text_language, looks_garbled, script_fraction
 
 MIN_PDF_TEXT_CHARS = 20   # fewer characters than this on a page => treat as scanned
 AUTO_ACCEPT_CONF = 0.85   # English OCR at least this confident => no need to try other languages
+OCR_DET_MAX_SIDE = int(os.getenv("OCR_DET_MAX_SIDE", "2048"))  # see get_ocr()
 
 _engines: dict = {}
 
 
+@traceable(name="load_ocr_engine", run_type="tool")
 def get_ocr(lang: str):
     """One PaddleOCR engine per language, loaded on first use (models download once)."""
     if lang not in _engines:
@@ -26,6 +29,13 @@ def get_ocr(lang: str):
             use_doc_orientation_classify=False,
             use_doc_unwarping=False,
             use_textline_orientation=False,
+            # Find text on a copy no larger than OCR_DET_MAX_SIDE px; each found line is still
+            # read from the full-resolution image. A 12 MP phone photo otherwise runs text
+            # detection at ~4000 px, which took 40-65 s per photo on CPU (now ~20-27 s, with
+            # the same or better word accuracy in tests). Images already smaller than the
+            # limit are processed exactly as before.
+            text_det_limit_type="max",
+            text_det_limit_side_len=OCR_DET_MAX_SIDE,
         )
     return _engines[lang]
 
@@ -39,6 +49,7 @@ def normalize_text(text: str) -> str:
     return text.strip()
 
 
+@traceable(name="paddle_ocr", run_type="tool", process_inputs=compact)
 def run_ocr(image, lang: str) -> tuple[str, float | None]:
     """OCR one image (path or BGR array) with the given language model."""
     lines, scores = [], []
@@ -57,6 +68,7 @@ def _score(text: str, conf: float | None, lang: str) -> float:
     return conf * script_fraction(text, lang)
 
 
+@traceable(name="auto_ocr_language_pick", run_type="chain", process_inputs=compact)
 def auto_ocr(image) -> tuple[str, float | None, str]:
     """
     Pick the language automatically. Clean English is accepted after one OCR run.
@@ -113,6 +125,7 @@ def extract_pdf(path: Path, language: str) -> list[dict]:
                 )
                 continue
 
+            annotate(**{f"page_{index}": "ocr"})
             dpi = 200 if ocr_lang == "en" else 250  # Indic scripts need more resolution
             pix = page.get_pixmap(dpi=dpi, alpha=False)
             img = np.frombuffer(pix.samples, dtype=np.uint8).reshape(pix.height, pix.width, 3)
@@ -135,6 +148,7 @@ def extract_pdf(path: Path, language: str) -> list[dict]:
     return pages
 
 
+@traceable(name="extract_file", run_type="chain", process_outputs=compact)
 def extract_file(path: Path, file_type: str, language: str = "auto") -> list[dict]:
     """file_type is 'jpeg', 'png' or 'pdf'. language is 'auto', 'en', 'hi' or 'kn'."""
     if file_type == "pdf":

@@ -1,7 +1,7 @@
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel, Field
 
-from app import usage
+from app import cache, usage
 from app.config import (
     EMBEDDING_MODELS,
     GEMINI_DAILY_LIMIT,
@@ -15,6 +15,8 @@ from app.embeddings import EmbeddingError
 from app.languages import LANGUAGES, detect_text_language, message
 from app.llm import LLMError, generate_answer
 from app.retrieval import retrieve
+from app.routes import conversations as convs
+from app.tracing import annotate, traceable
 
 router = APIRouter(prefix="/api/chat", tags=["chat"])
 
@@ -31,6 +33,7 @@ class ChatRequest(BaseModel):
     mode: str = "auto"  # "auto", "document", "general"
     k: int = Field(TOP_K, ge=1, le=10)
     answer_language: str = "auto"  # auto = match question language
+    conversation_id: str | None = None  # persist this exchange into a chat session
 
 
 def _meta(answer_lang: str, cached: bool = False, provider: str | None = None) -> dict:
@@ -60,6 +63,20 @@ def get_usage():
     return {"gemini_calls_today": usage.calls_today(), "gemini_daily_limit": GEMINI_DAILY_LIMIT}
 
 
+@router.get("/cache")
+def cache_stats():
+    """Cached answers per language/kind and cached embeddings per provider, with hit counts."""
+    return cache.stats()
+
+
+@router.delete("/cache")
+def clear_cache(scope: str = "answers"):
+    """scope: 'answers' (default), 'embeddings' or 'all'."""
+    if scope not in ("answers", "embeddings", "all"):
+        raise HTTPException(status_code=400, detail="scope must be 'answers', 'embeddings' or 'all'.")
+    return cache.clear(scope)
+
+
 @router.post("")
 def chat(req: ChatRequest):
     question = req.question.strip()
@@ -69,11 +86,42 @@ def chat(req: ChatRequest):
     # Determine response language
     lang = req.answer_language if req.answer_language in LANGUAGES else detect_text_language(question)
 
-    history_dicts = [{"role": m.role, "content": m.content} for m in req.history]
+    # Sessions: history comes from the stored conversation; a new one is created if needed
+    conversation_id = req.conversation_id
+    if conversation_id and not convs.conversation_exists(conversation_id):
+        raise HTTPException(status_code=404, detail="Conversation not found.")
+    if conversation_id:
+        history_dicts = convs.load_history(conversation_id)
+    else:
+        history_dicts = [{"role": m.role, "content": m.content} for m in req.history]
+        conversation_id = convs.create_conversation()
+
+    response = _answer(req, question, lang, history_dicts)
+
+    convs.save_exchange(
+        conversation_id,
+        question,
+        {"file_ids": req.file_ids or []},
+        response["answer"],
+        {
+            "sources": response.get("sources") or [],
+            "from_documents": response.get("from_documents", False),
+            "reason": response.get("reason"),
+            "model": response.get("model"),
+        },
+    )
+    return {**response, "conversation_id": conversation_id}
+
+
+@traceable(name="chat", run_type="chain", process_inputs=lambda d: {
+    "question": d["question"], "lang": d["lang"], "history_turns": len(d["history_dicts"]),
+    "mode": d["req"].mode, "file_ids": d["req"].file_ids, "k": d["req"].k})
+def _answer(req: ChatRequest, question: str, lang: str, history_dicts: list[dict]) -> dict:
 
     # Decide if this is Document Chat or Normal General Chat
     has_target_files = bool(req.file_ids and len(req.file_ids) > 0)
     is_doc_mode = (req.mode == "document") or (req.mode == "auto" and has_target_files)
+    annotate(doc_mode=is_doc_mode and has_target_files)
 
     # ---------------------------------------------------------
     # Mode 1: Document Chat (RAG)
@@ -108,6 +156,7 @@ def chat(req: ChatRequest):
 
         # If no relevant chunks meet the threshold, clearly refuse without hallucinating
         if not context:
+            annotate(refused="no chunk above score threshold", top_score=top_score)
             refusal_text = message("not_enough_info", lang)
             return {
                 "answer": refusal_text,
@@ -120,11 +169,11 @@ def chat(req: ChatRequest):
                 **_meta(lang, provider=provider),
             }
 
-        # Check Cache
-        cache_key = usage.make_cache_key(
-            question, [c["text"] for c in context], lang, f"{GEMINI_MODEL}:doc-v3"
-        )
-        cached = usage.cache_get(cache_key)
+        # Check cache: same normalized question + same context chunks + same answer language.
+        # Follow-ups depend on the conversation, so they always go to the model.
+        cache_key = cache.answer_key(question, lang, f"{GEMINI_MODEL}:doc", [c["text"] for c in context])
+        cached = None if history_dicts else cache.get_answer(cache_key)
+        annotate(answer_cache_hit=bool(cached), context_chunks=len(context), top_score=top_score)
         if cached:
             return {**cached, **_meta(lang, cached=True, provider=provider)}
 
@@ -176,16 +225,16 @@ def chat(req: ChatRequest):
                 "sources": [],
             }
 
-        usage.cache_put(cache_key, payload)
+        if not history_dicts:
+            cache.put_answer(cache_key, payload, "document" if payload["answerable"] else "refusal", lang)
         return {**payload, **_meta(lang, provider=provider)}
 
     # ---------------------------------------------------------
     # Mode 2: Normal General Chat (No document attached)
     # ---------------------------------------------------------
-    cache_key = usage.make_cache_key(
-        question, [], lang, f"{GEMINI_MODEL}:general-v3"
-    )
-    cached = usage.cache_get(cache_key)
+    cache_key = cache.answer_key(question, lang, f"{GEMINI_MODEL}:general")
+    cached = None if history_dicts else cache.get_answer(cache_key)
+    annotate(answer_cache_hit=bool(cached))
     if cached:
         return {**cached, **_meta(lang, cached=True)}
 
@@ -224,5 +273,6 @@ def chat(req: ChatRequest):
         "sources": [],
     }
 
-    usage.cache_put(cache_key, payload)
+    if not history_dicts:
+        cache.put_answer(cache_key, payload, "general", lang)
     return {**payload, **_meta(lang)}

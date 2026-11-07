@@ -96,6 +96,59 @@ def init_db():
             "CREATE TABLE IF NOT EXISTS answer_cache ("
             "cache_key TEXT PRIMARY KEY, payload TEXT NOT NULL, created_at TEXT NOT NULL)"
         )
+        _add_column(conn, "answer_cache", "expires_at", "TEXT")
+        _add_column(conn, "answer_cache", "last_used", "TEXT")
+        _add_column(conn, "answer_cache", "hits", "INTEGER NOT NULL DEFAULT 0")
+        _add_column(conn, "answer_cache", "kind", "TEXT")
+        _add_column(conn, "answer_cache", "language", "TEXT")
+        # Entries from before the language-aware cache use the old key scheme and never expire
+        conn.execute("DELETE FROM answer_cache WHERE expires_at IS NULL")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_answer_cache_used ON answer_cache (last_used)")
+
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS embedding_cache (
+                cache_key   TEXT PRIMARY KEY,
+                vector      BLOB NOT NULL,
+                provider    TEXT NOT NULL,
+                task_type   TEXT NOT NULL,
+                created_at  TEXT NOT NULL,
+                last_used   TEXT NOT NULL,
+                hits        INTEGER NOT NULL DEFAULT 0
+            )
+            """
+        )
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_embedding_cache_used ON embedding_cache (last_used)")
+
+        # Chat sessions (like ChatGPT/Claude conversations)
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS conversations (
+                conversation_id  TEXT PRIMARY KEY,
+                title            TEXT,
+                file_id          TEXT,
+                created_at       TEXT NOT NULL,
+                updated_at       TEXT NOT NULL,
+                FOREIGN KEY (file_id) REFERENCES files (file_id) ON DELETE SET NULL
+            )
+            """
+        )
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS messages (
+                id               INTEGER PRIMARY KEY AUTOINCREMENT,
+                conversation_id  TEXT NOT NULL,
+                role             TEXT NOT NULL,
+                kind             TEXT NOT NULL DEFAULT 'text',
+                content          TEXT NOT NULL,
+                meta             TEXT,
+                created_at       TEXT NOT NULL,
+                FOREIGN KEY (conversation_id) REFERENCES conversations (conversation_id) ON DELETE CASCADE
+            )
+            """
+        )
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_messages_conv ON messages (conversation_id, id)")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_conv_updated ON conversations (updated_at)")
 
 
 def allocate_vector_ids(conn, count: int) -> list[int]:

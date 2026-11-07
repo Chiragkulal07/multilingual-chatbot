@@ -6,6 +6,8 @@ from dotenv import load_dotenv
 BASE_DIR = Path(__file__).resolve().parent.parent
 load_dotenv(BASE_DIR / ".env", override=True)
 
+from app import tracing  # noqa: E402,F401  (reads LANGSMITH_* from .env, so it must come after load_dotenv)
+
 UPLOAD_DIR = BASE_DIR / "storage" / "uploads"
 DB_PATH = BASE_DIR / "storage" / "metadata.db"
 FAISS_INDEX_PATH = BASE_DIR / "storage" / "faiss.index"
@@ -66,3 +68,12 @@ SCORE_THRESHOLDS = {
     }
     for p in EMBEDDING_MODELS
 }
+
+# Caching (see app/cache.py). Answers expire; embeddings are deterministic and only size-capped.
+ANSWER_CACHE_TTL_DAYS = {
+    "document": int(os.getenv("CACHE_TTL_DOCUMENT_DAYS", "30")),  # keyed on the exact context chunks
+    "general": int(os.getenv("CACHE_TTL_GENERAL_DAYS", "7")),  # world facts can go stale
+    "refusal": int(os.getenv("CACHE_TTL_REFUSAL_DAYS", "1")),  # "not in document" — retry soon
+}
+ANSWER_CACHE_MAX_ENTRIES = int(os.getenv("ANSWER_CACHE_MAX_ENTRIES", "5000"))
+EMBEDDING_CACHE_MAX_ENTRIES = int(os.getenv("EMBEDDING_CACHE_MAX_ENTRIES", "50000"))

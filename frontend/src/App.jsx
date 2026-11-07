@@ -1,10 +1,26 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import { askQuestion, getFile, listFiles, originalUrl, reprocessFile, uploadFiles } from "./api";
+import {
+  askQuestion,
+  attachFileToConversation,
+  createConversation,
+  deleteConversation,
+  getConversation,
+  getFile,
+  listConversations,
+  originalUrl,
+  reprocessFile,
+  updateConversation,
+  uploadFiles,
+} from "./api";
 import { renderMarkdown } from "./markdown.jsx";
 import "./App.css";
 
 const ALLOWED_EXT = [".jpg", ".jpeg", ".png", ".pdf"];
 const MAX_SIZE = 10 * 1024 * 1024; // 10 MB
+// OCR on a large or multi-page scan can take minutes on CPU; keep polling that long.
+const PROCESSING_TIMEOUT_MS = 10 * 60 * 1000;
+const STILL_PROCESSING_TEXT = (name) =>
+  `${name} is still being processed. It will appear in your files when it is ready; you can retry from there.`;
 
 function precheck(file) {
   const dot = file.name.lastIndexOf(".");
@@ -30,24 +46,89 @@ const THINK_PHASES_DOC = [
 ];
 const THINK_PHASES_CHAT = ["Understanding the question", "Reasoning it through", "Composing the answer"];
 
+// Convert stored backend messages into the shape the thread renders.
+function fromStoredMessage(m) {
+  const meta = m.meta || {};
+  if (m.kind === "file") {
+    return {
+      id: `db-${m.id}`,
+      role: "assistant",
+      isFileAttached: true,
+      stage: "ready",
+      text: m.content,
+      fileInfo: {
+        id: meta.file_id,
+        name: meta.filename,
+        size: meta.size_bytes,
+        type: (meta.file_type || "").toUpperCase(),
+        isImage: meta.file_type !== "pdf",
+        detected_language: meta.detected_language,
+      },
+    };
+  }
+  if (m.role === "user") {
+    return {
+      id: `db-${m.id}`,
+      role: "user",
+      text: m.content,
+      attachedFile: meta.attached_filename ? { name: meta.attached_filename } : null,
+    };
+  }
+  return {
+    id: `db-${m.id}`,
+    role: "assistant",
+    text: m.content,
+    sources: meta.sources || [],
+    fromDocuments: meta.from_documents,
+  };
+}
+
+// Bucket chats by last activity, like ChatGPT / Claude.
+function groupConversations(list) {
+  const startOfToday = new Date();
+  startOfToday.setHours(0, 0, 0, 0);
+  const day = 24 * 60 * 60 * 1000;
+  const buckets = [
+    { label: "Today", after: startOfToday.getTime(), items: [] },
+    { label: "Yesterday", after: startOfToday.getTime() - day, items: [] },
+    { label: "Previous 7 days", after: startOfToday.getTime() - 7 * day, items: [] },
+    { label: "Previous 30 days", after: startOfToday.getTime() - 30 * day, items: [] },
+    { label: "Older", after: -Infinity, items: [] },
+  ];
+  for (const c of list) {
+    const t = new Date(c.updated_at).getTime();
+    buckets.find((b) => t >= b.after).items.push(c);
+  }
+  return buckets.filter((b) => b.items.length > 0);
+}
+
+function readConversationFromUrl() {
+  return new URLSearchParams(window.location.search).get("c");
+}
+
+function writeConversationToUrl(id) {
+  const url = new URL(window.location.href);
+  if (id) url.searchParams.set("c", id);
+  else url.searchParams.delete("c");
+  window.history.replaceState(null, "", url);
+}
+
+/* Brand monogram: a page whose lines resolve into a highlighted passage. */
+function BrandGlyph({ size = 16 }) {
+  return (
+    <svg width={size} height={size} viewBox="0 0 24 24" fill="none" aria-hidden="true">
+      <path d="M6 3.5h8.2L19 8.3V19a1.5 1.5 0 0 1-1.5 1.5h-11A1.5 1.5 0 0 1 5 19V5a1.5 1.5 0 0 1 1-1.5Z" stroke="currentColor" strokeWidth="1.7" strokeLinejoin="round" />
+      <path d="M14 3.6V8.5h4.9" stroke="currentColor" strokeWidth="1.7" strokeLinejoin="round" />
+      <path d="M8.5 12h7M8.5 15.5h4.5" stroke="currentColor" strokeWidth="1.7" strokeLinecap="round" />
+      <circle cx="16.4" cy="15.5" r="1.25" fill="var(--brass)" />
+    </svg>
+  );
+}
+
 function AssistantMark({ thinking = false }) {
   return (
     <div className={`assistant-avatar ${thinking ? "is-thinking" : ""}`} aria-hidden="true">
-      {thinking ? (
-        <>
-          <span className="orbit orbit-a"></span>
-          <span className="orbit orbit-b"></span>
-          <span className="orbit orbit-c"></span>
-          <span className="orbit-core"></span>
-        </>
-      ) : (
-        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round">
-          <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z" />
-          <polyline points="14 2 14 8 20 8" />
-          <line x1="8" y1="13" x2="16" y2="13" />
-          <line x1="8" y1="17" x2="13" y2="17" />
-        </svg>
-      )}
+      <BrandGlyph size={15} />
     </div>
   );
 }
@@ -102,9 +183,6 @@ function ThinkingIndicator({ hasDocument }) {
     <div className="message-turn assistant-turn thinking-turn" role="status" aria-live="polite">
       <AssistantMark thinking />
       <div className="assistant-body thinking-body">
-        <div className="thinking-track">
-          <span className="thinking-track-runner"></span>
-        </div>
         <div className="thinking-status">
           <span key={phase} className="thinking-phase">
             {phases[phase]}
@@ -114,15 +192,6 @@ function ThinkingIndicator({ hasDocument }) {
             <i></i>
             <i></i>
           </span>
-        </div>
-        <div className="thinking-steps">
-          {phases.map((label, i) => (
-            <span
-              key={label}
-              className={`thinking-step ${i < phase ? "is-done" : ""} ${i === phase ? "is-active" : ""}`}
-              title={label}
-            ></span>
-          ))}
         </div>
         <div className="thinking-skeleton">
           <span style={{ width: "94%" }}></span>
@@ -138,7 +207,11 @@ export default function App() {
   const [messages, setMessages] = useState([]);
   const [input, setInput] = useState("");
   const [activeFile, setActiveFile] = useState(null); // currently attached document
-  const [allFiles, setAllFiles] = useState([]);
+  const [conversations, setConversations] = useState([]);
+  const [conversationId, setConversationId] = useState(null);
+  const [loadingConversation, setLoadingConversation] = useState(false);
+  const [renamingId, setRenamingId] = useState(null);
+  const [renameValue, setRenameValue] = useState("");
   const [language, setLanguage] = useState("auto");
   const [loading, setLoading] = useState(false);
   const [uploading, setUploading] = useState(false);
@@ -150,25 +223,108 @@ export default function App() {
   const messagesEndRef = useRef(null);
   const textareaRef = useRef(null);
   const isUploadingRef = useRef(false);
+  // Which chat is on screen right now; async work checks it before touching the thread.
+  const activeConvRef = useRef(null);
+  // Bumped whenever the visible thread is swapped (new chat / open chat).
+  const threadEpochRef = useRef(0);
 
   // Auto-scroll to bottom
   useEffect(() => {
     messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
   }, [messages, loading, uploading]);
 
-  // Load uploaded files list
-  const refreshFiles = useCallback(async () => {
+  const selectConversationId = (id) => {
+    activeConvRef.current = id;
+    setConversationId(id);
+    writeConversationToUrl(id);
+  };
+
+  // Load chat sessions list
+  const refreshConversations = useCallback(async () => {
     try {
-      const data = await listFiles();
-      setAllFiles(data);
+      setConversations(await listConversations());
     } catch {
       // Backend may be offline
     }
   }, []);
 
+  const openConversation = useCallback(async (id) => {
+    threadEpochRef.current += 1;
+    activeConvRef.current = id;
+    setLoading(false);
+    setConversationId(id);
+    writeConversationToUrl(id);
+    setLoadingConversation(true);
+    setMessages([]);
+    setActiveFile(null);
+    setDetailsOpen({});
+    try {
+      const data = await getConversation(id);
+      if (activeConvRef.current !== id) return;
+      setMessages(data.messages.map(fromStoredMessage));
+      setActiveFile(data.active_file);
+    } catch {
+      if (activeConvRef.current !== id) return;
+      // Chat no longer exists (deleted, or a stale link) — fall back to a fresh one.
+      activeConvRef.current = null;
+      setConversationId(null);
+      writeConversationToUrl(null);
+    } finally {
+      if (activeConvRef.current === id || activeConvRef.current === null) setLoadingConversation(false);
+    }
+  }, []);
+
   useEffect(() => {
-    refreshFiles();
-  }, [refreshFiles]);
+    refreshConversations();
+    const fromUrl = readConversationFromUrl();
+    if (fromUrl) openConversation(fromUrl);
+  }, [refreshConversations, openConversation]);
+
+  // Returns the current chat's id, creating the session on the backend if needed.
+  const ensureConversation = async () => {
+    if (activeConvRef.current) return activeConvRef.current;
+    const conv = await createConversation();
+    selectConversationId(conv.conversation_id);
+    return conv.conversation_id;
+  };
+
+  const handleDetach = () => {
+    setActiveFile(null);
+    if (conversationId) {
+      updateConversation(conversationId, { detach_file: true })
+        .then(refreshConversations)
+        .catch(() => {});
+    }
+  };
+
+  const handleDeleteConversation = async (id) => {
+    if (!window.confirm("Delete this chat? This cannot be undone.")) return;
+    try {
+      await deleteConversation(id);
+    } catch {
+      return;
+    }
+    if (activeConvRef.current === id) handleNewChat();
+    refreshConversations();
+  };
+
+  const startRename = (c) => {
+    setRenamingId(c.conversation_id);
+    setRenameValue(c.title);
+  };
+
+  const commitRename = async () => {
+    const id = renamingId;
+    const title = renameValue.trim();
+    setRenamingId(null);
+    if (!id || !title) return;
+    setConversations((prev) => prev.map((c) => (c.conversation_id === id ? { ...c, title } : c)));
+    try {
+      await updateConversation(id, { title });
+    } finally {
+      refreshConversations();
+    }
+  };
 
   // Auto-resize input textarea
   const handleInputChange = (e) => {
@@ -210,6 +366,19 @@ export default function App() {
     const tempId = Date.now();
     isUploadingRef.current = true;
     setUploading(true);
+
+    let cid;
+    try {
+      cid = await ensureConversation();
+    } catch (e) {
+      isUploadingRef.current = false;
+      setUploading(false);
+      setMessages((prev) => [
+        ...prev,
+        { id: tempId, role: "assistant", text: `Upload failed: ${e.message}`, isError: true },
+      ]);
+      return;
+    }
 
     const isImage = file.type.startsWith("image/") || /\.(jpg|jpeg|png)$/i.test(file.name);
     const localPreviewUrl = isImage ? URL.createObjectURL(file) : null;
@@ -259,12 +428,11 @@ export default function App() {
       const fileId = uploaded.file_id;
 
       // Poll real backend stages from /api/files/{file_id}
-      let isReady = false;
-      let attempts = 0;
+      let isDone = false;
+      const deadline = Date.now() + PROCESSING_TIMEOUT_MS;
 
-      while (!isReady && attempts < 80) {
+      while (!isDone && Date.now() < deadline) {
         await new Promise((res) => setTimeout(res, 900));
-        attempts += 1;
         try {
           const detail = await getFile(fileId);
           const currentStage = detail.stage || detail.status;
@@ -282,9 +450,10 @@ export default function App() {
           }
 
           if (detail.status === "ready") {
-            isReady = true;
-            setActiveFile(detail);
-            refreshFiles();
+            isDone = true;
+            await attachFileToConversation(cid, fileId).catch(() => {});
+            if (activeConvRef.current === cid) setActiveFile(detail);
+            refreshConversations();
 
             setMessages((prev) =>
               prev.map((m) =>
@@ -321,6 +490,7 @@ export default function App() {
                   : m
               )
             );
+            isDone = true;
             break;
           } else {
             // Update live stage in chat UI
@@ -339,6 +509,15 @@ export default function App() {
         } catch {
           // Retry poll
         }
+      }
+      if (!isDone) {
+        setMessages((prev) =>
+          prev.map((m) =>
+            m.id === tempId
+              ? { ...m, isProcessing: false, stage: "failed", isError: true, fileId, text: STILL_PROCESSING_TEXT(file.name) }
+              : m
+          )
+        );
       }
     } catch (e) {
       setMessages((prev) =>
@@ -377,20 +556,21 @@ export default function App() {
       )
     );
     setUploading(true);
+    const cid = activeConvRef.current;
 
     try {
       await reprocessFile(fileId, language);
-      let isReady = false;
-      let attempts = 0;
+      let isDone = false;
+      const deadline = Date.now() + PROCESSING_TIMEOUT_MS;
 
-      while (!isReady && attempts < 80) {
+      while (!isDone && Date.now() < deadline) {
         await new Promise((res) => setTimeout(res, 1000));
-        attempts += 1;
         const detail = await getFile(fileId);
         if (detail.status === "ready") {
-          isReady = true;
-          setActiveFile(detail);
-          refreshFiles();
+          isDone = true;
+          if (cid) await attachFileToConversation(cid, fileId).catch(() => {});
+          if (activeConvRef.current === cid) setActiveFile(detail);
+          refreshConversations();
           setMessages((prev) =>
             prev.map((m) =>
               m.id === messageId
@@ -420,8 +600,18 @@ export default function App() {
                 : m
             )
           );
+          isDone = true;
           break;
         }
+      }
+      if (!isDone) {
+        setMessages((prev) =>
+          prev.map((m) =>
+            m.id === messageId
+              ? { ...m, isProcessing: false, stage: "failed", isError: true, text: STILL_PROCESSING_TEXT(filename) }
+              : m
+          )
+        );
       }
     } catch (e) {
       setMessages((prev) =>
@@ -463,14 +653,17 @@ export default function App() {
     setMessages((prev) => [...prev, newUserMsg]);
     setLoading(true);
 
-    // Build history for multi-turn conversation memory
-    const historyPayload = messages
-      .filter((m) => !m.isProcessing && !m.isError && m.text)
-      .slice(-6);
+    // Conversation memory lives on the backend; a new session is created on the first message.
+    const sentFrom = activeConvRef.current;
+    const epoch = threadEpochRef.current;
 
     try {
       const fileIds = activeFile ? [activeFile.file_id] : null;
-      const res = await askQuestion(question, fileIds, language, historyPayload);
+      const res = await askQuestion(question, fileIds, language, sentFrom);
+      refreshConversations();
+
+      if (threadEpochRef.current !== epoch) return; // user switched chats meanwhile
+      if (!sentFrom && res.conversation_id) selectConversationId(res.conversation_id);
 
       setMessages((prev) => [
         ...prev,
@@ -485,6 +678,7 @@ export default function App() {
         },
       ]);
     } catch (e) {
+      if (threadEpochRef.current !== epoch) return;
       const errText =
         e.message === "Failed to fetch"
           ? "Unable to reach the server. Make sure the backend is running."
@@ -499,15 +693,21 @@ export default function App() {
         },
       ]);
     } finally {
-      setLoading(false);
+      if (threadEpochRef.current === epoch) setLoading(false);
     }
   };
 
-  const handleNewChat = () => {
+  function handleNewChat() {
+    threadEpochRef.current += 1;
+    selectConversationId(null);
     setMessages([]);
     setActiveFile(null);
     setInput("");
-  };
+    setDetailsOpen({});
+    setLoading(false);
+    setLoadingConversation(false);
+    setSidebarOpen(false);
+  }
 
   // Drag and drop handler
   const [dragging, setDragging] = useState(false);
@@ -533,17 +733,12 @@ export default function App() {
       onDragLeave={handleDragLeave}
       onDrop={handleDrop}
     >
-      {/* Left Sidebar for Document Library & History */}
+      {/* Left Sidebar: chat history */}
       <aside className={`chat-sidebar ${sidebarOpen ? "sidebar-open" : ""}`}>
         <div className="sidebar-header">
           <div className="brand">
             <span className="brand-mark" aria-hidden="true">
-              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round">
-                <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z" />
-                <polyline points="14 2 14 8 20 8" />
-                <line x1="8" y1="13" x2="16" y2="13" />
-                <line x1="8" y1="17" x2="13" y2="17" />
-              </svg>
+              <BrandGlyph size={17} />
             </span>
             <span className="brand-name">DocuSense</span>
           </div>
@@ -565,41 +760,90 @@ export default function App() {
           </button>
         </div>
 
-        <div className="sidebar-content">
-          <div className="sidebar-section-title">
-            <span>Documents</span>
-            {allFiles.length > 0 && <span className="sidebar-count">{allFiles.length}</span>}
-          </div>
-          {allFiles.length === 0 ? (
-            <p className="sidebar-empty">No documents uploaded yet.</p>
+        <nav className="sidebar-content" aria-label="Chat history">
+          {conversations.length === 0 ? (
+            <p className="sidebar-empty">Your chats will appear here.</p>
           ) : (
-            <ul className="sidebar-file-list">
-              {allFiles.map((f) => {
-                const isCurrent = activeFile?.file_id === f.file_id;
-                const isPdf = f.file_type === "pdf";
-                return (
-                  <li
-                    key={f.file_id}
-                    className={`sidebar-file-item ${isCurrent ? "file-item-active" : ""}`}
-                    onClick={() => {
-                      setActiveFile(f);
-                      setSidebarOpen(false);
-                    }}
-                  >
-                    <span className={`sidebar-type-tag ${isPdf ? "tag-pdf" : "tag-img"}`}>
-                      {f.file_type.toUpperCase()}
-                    </span>
-                    <span className="sidebar-file-name" title={f.filename}>
-                      {f.filename}
-                    </span>
-                    {isCurrent && <span className="active-dot"></span>}
-                  </li>
-                );
-              })}
-            </ul>
+            groupConversations(conversations).map((group) => (
+              <div key={group.label} className="conv-group">
+                <div className="sidebar-section-title">
+                  <span>{group.label}</span>
+                </div>
+                <ul className="conv-list">
+                  {group.items.map((c) => {
+                    const isCurrent = c.conversation_id === conversationId;
+                    const isRenaming = renamingId === c.conversation_id;
+                    return (
+                      <li
+                        key={c.conversation_id}
+                        className={`conv-item ${isCurrent ? "conv-item-active" : ""}`}
+                        onClick={() => {
+                          if (isRenaming) return;
+                          if (!isCurrent) openConversation(c.conversation_id);
+                          setSidebarOpen(false);
+                        }}
+                      >
+                        {isRenaming ? (
+                          <input
+                            className="conv-rename-input"
+                            value={renameValue}
+                            autoFocus
+                            onChange={(e) => setRenameValue(e.target.value)}
+                            onBlur={commitRename}
+                            onClick={(e) => e.stopPropagation()}
+                            onKeyDown={(e) => {
+                              if (e.key === "Enter") commitRename();
+                              if (e.key === "Escape") setRenamingId(null);
+                            }}
+                          />
+                        ) : (
+                          <>
+                            <span className="conv-title" title={c.title}>
+                              {c.title}
+                            </span>
+                            <span className="conv-actions">
+                              <button
+                                className="conv-action-btn"
+                                title="Rename"
+                                onClick={(e) => {
+                                  e.stopPropagation();
+                                  startRename(c);
+                                }}
+                              >
+                                <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                                  <path d="M12 20h9" />
+                                  <path d="M16.5 3.5a2.1 2.1 0 0 1 3 3L7 19l-4 1 1-4Z" />
+                                </svg>
+                              </button>
+                              <button
+                                className="conv-action-btn conv-action-danger"
+                                title="Delete"
+                                onClick={(e) => {
+                                  e.stopPropagation();
+                                  handleDeleteConversation(c.conversation_id);
+                                }}
+                              >
+                                <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                                  <polyline points="3 6 5 6 21 6" />
+                                  <path d="M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6" />
+                                  <path d="M10 11v6M14 11v6" />
+                                  <path d="M9 6V4a1 1 0 0 1 1-1h4a1 1 0 0 1 1 1v2" />
+                                </svg>
+                              </button>
+                            </span>
+                          </>
+                        )}
+                      </li>
+                    );
+                  })}
+                </ul>
+              </div>
+            ))
           )}
-        </div>
+        </nav>
       </aside>
+
+      {sidebarOpen && <div className="sidebar-backdrop" onClick={() => setSidebarOpen(false)} aria-hidden="true" />}
 
       {/* Main Chat Area */}
       <div className="chat-main-container">
@@ -630,15 +874,17 @@ export default function App() {
                     className="detach-btn"
                     onClick={(e) => {
                       e.stopPropagation();
-                      setActiveFile(null);
+                      handleDetach();
                     }}
                     title="Detach document (Switch to normal chat)"
                   >
-                    ✕
+                    <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" aria-hidden="true"><path d="M18 6 6 18M6 6l12 12" /></svg>
                   </button>
                 </span>
               ) : (
-                <span className="navbar-context">General chat · no document attached</span>
+                <span className="navbar-context">
+                  {conversations.find((c) => c.conversation_id === conversationId)?.title || "New chat"}
+                </span>
               )}
             </span>
           </div>
@@ -668,86 +914,62 @@ export default function App() {
         {/* Message Thread */}
         <main className="chat-messages-scroll">
           <div className="chat-thread-inner">
-            {messages.length === 0 ? (
+            {loadingConversation ? (
+              <div className="conv-loading" role="status">
+                <span></span>
+                <span></span>
+                <span></span>
+              </div>
+            ) : messages.length === 0 ? (
               <div className="chat-empty-state">
-                <div className="empty-mark" aria-hidden="true">
-                  <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
-                    <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z" />
-                    <polyline points="14 2 14 8 20 8" />
-                    <line x1="8" y1="13" x2="16" y2="13" />
-                    <line x1="8" y1="17" x2="13" y2="17" />
-                  </svg>
-                </div>
-                <h1 className="empty-heading">Ask about your documents</h1>
+                <p className="empty-eyebrow">
+                  <span className="eyebrow-dot" aria-hidden="true"></span>
+                  Document intelligence
+                  <span className="eyebrow-langs" lang="mul">English · हिन्दी · ಕನ್ನಡ</span>
+                </p>
+                <h1 className="empty-heading">
+                  Read any document.
+                  <em> Ask it anything.</em>
+                </h1>
                 <p className="empty-subheading">
-                  Attach a PDF or image to ask questions about its contents, or start a conversation without one.
+                  Scans, photos and PDFs are read with OCR, indexed, and answered with the passages they came from.
                 </p>
 
-                <div className="empty-suggestions-grid">
-                  <button
-                    className="suggestion-box"
-                    onClick={() => fileInputRef.current?.click()}
-                  >
-                    <span className="suggestion-icon">
-                      <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-                        <path d="M21.44 11.05l-9.19 9.19a6 6 0 0 1-8.49-8.49l9.19-9.19a4 4 0 0 1 5.66 5.66l-9.2 9.19a2 2 0 0 1-2.83-2.83l8.49-8.48" />
-                      </svg>
+                <button
+                  type="button"
+                  className="empty-dropzone"
+                  onClick={() => fileInputRef.current?.click()}
+                  disabled={uploading}
+                >
+                  <span className="dropzone-icon" aria-hidden="true">
+                    <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.7" strokeLinecap="round" strokeLinejoin="round">
+                      <path d="M12 15V4" />
+                      <path d="m7.5 8.5 4.5-4.5 4.5 4.5" />
+                      <path d="M4 15v3.5A1.5 1.5 0 0 0 5.5 20h13a1.5 1.5 0 0 0 1.5-1.5V15" />
+                    </svg>
+                  </span>
+                  <span className="dropzone-copy">
+                    <span className="dropzone-title">
+                      Drop a document here, or <u>browse</u>
                     </span>
-                    <span className="suggestion-copy">
-                      <span className="suggestion-text">Attach an image or PDF</span>
-                      <span className="suggestion-category">Upload a document</span>
-                    </span>
-                  </button>
+                    <span className="dropzone-meta">PDF, PNG or JPG · up to 10 MB · handwriting and scans welcome</span>
+                  </span>
+                </button>
 
-                  <button
-                    className="suggestion-box"
-                    onClick={() => handleSend("Summarize the key information in this document")}
-                  >
-                    <span className="suggestion-icon">
-                      <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-                        <line x1="4" y1="6" x2="20" y2="6" />
-                        <line x1="4" y1="12" x2="16" y2="12" />
-                        <line x1="4" y1="18" x2="12" y2="18" />
+                <div className="empty-suggestions-grid" role="list" aria-label="Suggested prompts">
+                  <span className="suggestions-label">Or start with</span>
+                  {[
+                    ["Summarize the key points", "Summarize the key information in this document"],
+                    ["Extract dates, figures and amounts", "Extract all dates, figures, and amounts"],
+                    ["What is the capital of Karnataka?", "What is the capital of Karnataka and what is it known for?"],
+                  ].map(([label, prompt]) => (
+                    <button key={label} role="listitem" className="suggestion-box" onClick={() => handleSend(prompt)}>
+                      <span className="suggestion-text">{label}</span>
+                      <svg className="suggestion-arrow" width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+                        <path d="M5 12h14M13 6l6 6-6 6" />
                       </svg>
-                    </span>
-                    <span className="suggestion-copy">
-                      <span className="suggestion-text">Summarize the key points</span>
-                      <span className="suggestion-category">Document analysis</span>
-                    </span>
-                  </button>
-
-                  <button
-                    className="suggestion-box"
-                    onClick={() => handleSend("Extract all dates, figures, and amounts")}
-                  >
-                    <span className="suggestion-icon">
-                      <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-                        <rect x="3" y="4" width="18" height="18" rx="2" />
-                        <line x1="16" y1="2" x2="16" y2="6" />
-                        <line x1="8" y1="2" x2="8" y2="6" />
-                        <line x1="3" y1="10" x2="21" y2="10" />
-                      </svg>
-                    </span>
-                    <span className="suggestion-copy">
-                      <span className="suggestion-text">Extract dates, figures and amounts</span>
-                      <span className="suggestion-category">Information extraction</span>
-                    </span>
-                  </button>
-
-                  <button
-                    className="suggestion-box"
-                    onClick={() => handleSend("What is the capital of Karnataka and what is it known for?")}
-                  >
-                    <span className="suggestion-icon">
-                      <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-                        <path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z" />
-                      </svg>
-                    </span>
-                    <span className="suggestion-copy">
-                      <span className="suggestion-text">What is the capital of Karnataka?</span>
-                      <span className="suggestion-category">General chat</span>
-                    </span>
-                  </button>
+                    </button>
+                  ))}
                 </div>
               </div>
             ) : (
@@ -794,15 +1016,7 @@ export default function App() {
                               />
 
                               {/* Horizontal laser scanning line moving top-to-bottom */}
-                              {isScanning && (
-                                <div className="scanning-laser-line">
-                                  <div className="laser-beam"></div>
-                                  <div className="laser-glow-trail"></div>
-                                </div>
-                              )}
-
-                              {/* Subtle scanning grid overlay */}
-                              {isScanning && <div className="scanning-grid-overlay"></div>}
+                              {isScanning && <div className="scanning-laser-line" aria-hidden="true"></div>}
                             </div>
                           </div>
                         ) : (
@@ -844,7 +1058,7 @@ export default function App() {
 
                             {isDone && (
                               <div className="ready-stage-indicator">
-                                <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="#16a34a" strokeWidth="2.5">
+                                <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5">
                                   <polyline points="20 6 9 17 4 12" />
                                 </svg>
                                 <span className="stage-text-success">Document ready</span>
@@ -1024,10 +1238,10 @@ export default function App() {
                 <span className="chip-name">{activeFile.filename}</span>
                 <button
                   className="chip-remove-btn"
-                  onClick={() => setActiveFile(null)}
+                  onClick={handleDetach}
                   title="Detach document (Switch to normal chat)"
                 >
-                  ✕
+                  <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" aria-hidden="true"><path d="M18 6 6 18M6 6l12 12" /></svg>
                 </button>
               </div>
             )}

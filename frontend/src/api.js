@@ -65,7 +65,7 @@ export async function searchChunks(query, k = 5) {
   return data.results;
 }
 
-export async function askQuestion(question, fileIds = null, answerLanguage = "auto", history = []) {
+export async function askQuestion(question, fileIds = null, answerLanguage = "auto", conversationId = null) {
   const res = await fetch(`${API_BASE}/api/chat`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
@@ -73,10 +73,60 @@ export async function askQuestion(question, fileIds = null, answerLanguage = "au
       question,
       file_ids: fileIds && fileIds.length > 0 ? fileIds : null,
       answer_language: answerLanguage,
-      history: history.map((h) => ({ role: h.role, content: h.text || h.content || "" })),
+      conversation_id: conversationId,
     }),
   });
   if (!res.ok) throw new Error(await parseError(res, "Could not get an answer"));
+  return res.json();
+}
+
+// ---- Chat sessions ----
+export async function listConversations() {
+  const res = await fetch(`${API_BASE}/api/conversations`);
+  if (!res.ok) throw new Error(await parseError(res, "Could not load chats"));
+  const data = await res.json();
+  return data.conversations;
+}
+
+export async function createConversation() {
+  const res = await fetch(`${API_BASE}/api/conversations`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({}),
+  });
+  if (!res.ok) throw new Error(await parseError(res, "Could not start a chat"));
+  return res.json();
+}
+
+export async function getConversation(conversationId) {
+  const res = await fetch(`${API_BASE}/api/conversations/${conversationId}`);
+  if (!res.ok) throw new Error(await parseError(res, "Could not load chat"));
+  return res.json();
+}
+
+export async function updateConversation(conversationId, changes) {
+  const res = await fetch(`${API_BASE}/api/conversations/${conversationId}`, {
+    method: "PATCH",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(changes),
+  });
+  if (!res.ok) throw new Error(await parseError(res, "Could not update chat"));
+  return res.json();
+}
+
+export async function deleteConversation(conversationId) {
+  const res = await fetch(`${API_BASE}/api/conversations/${conversationId}`, { method: "DELETE" });
+  if (!res.ok) throw new Error(await parseError(res, "Could not delete chat"));
+  return res.json();
+}
+
+export async function attachFileToConversation(conversationId, fileId) {
+  const res = await fetch(`${API_BASE}/api/conversations/${conversationId}/attach`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ file_id: fileId }),
+  });
+  if (!res.ok) throw new Error(await parseError(res, "Could not attach document"));
   return res.json();
 }
 

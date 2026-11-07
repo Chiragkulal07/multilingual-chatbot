@@ -1,12 +1,14 @@
 import logging
 import threading
+import time
 
 from app import vector_store
 from app.chunking import chunk_pages
 from app.config import EMBEDDING_PROVIDERS, FAISS_INDEX_PATH, UPLOAD_DIR, embedding_id
 from app.database import allocate_vector_ids, get_conn, get_setting, set_setting
-from app.extraction import extract_file
+from app.extraction import extract_file, get_ocr
 from app.index_sync import commit_lock, embed_all, sync_all
+from app.tracing import annotate, compact, traceable
 
 logger = logging.getLogger("processing")
 
@@ -42,6 +44,7 @@ def _insert_chunks(conn, chunks: list[dict]) -> None:
     )
 
 
+@traceable(name="process_file", run_type="chain")
 def process_file(file_id: str) -> None:
     """Background job: extract, chunk, embed, index, then mark ready."""
     with get_conn() as conn:
@@ -62,6 +65,8 @@ def process_file(file_id: str) -> None:
             return
 
         chunks = chunk_pages(file_id, pages)
+        annotate(file_type=row["file_type"], pages=len(pages), chunks=len(chunks),
+                 ocr_pages=sum(p["method"] == "ocr" for p in pages))
         if not chunks:
             set_status(file_id, "failed", "No readable text was found in this file.", stage="failed")
             return
@@ -201,6 +206,47 @@ def backfill_embeddings() -> None:
 
     sync_all()  # re-embeds into any index that is empty or behind (also handles model changes)
     print("[startup] Embedding done.")
+
+
+@traceable(name="startup_warmup", run_type="chain")
+def warm_up() -> None:
+    """Load the slow one-time things before the first request needs them.
+
+    Without this the FIRST upload after every server start waits ~40s for PaddleOCR to load
+    its models, and the FIRST question waits ~3s while the Gemini SDK builds its client
+    (it loads the TLS certificate bundle three times). Runs in a background thread so the
+    server starts answering immediately; an upload that arrives early simply waits on the
+    same lock instead of loading the models a second time."""
+    start = time.perf_counter()
+    from app.config import GEMINI_API_KEY, OPENAI_API_KEY
+    from app.llm import _get_client, _get_openai_client
+
+    for name, key, make in (("Gemini", GEMINI_API_KEY, _get_client), ("OpenAI", OPENAI_API_KEY, _get_openai_client)):
+        if key:
+            try:
+                make()
+            except Exception as e:
+                logger.warning("Warm-up: could not create the %s client: %s", name, e)
+
+    try:
+        import cv2
+        import numpy as np
+
+        sample = np.full((64, 320, 3), 255, dtype=np.uint8)
+        cv2.putText(sample, "Warm up 123", (8, 44), cv2.FONT_HERSHEY_SIMPLEX, 1.2, (0, 0, 0), 2)
+        # English first: every upload in "auto" mode starts with it. Kannada and Hindi are
+        # tried in auto mode when the English result is weak, so load them too.
+        for lang in ("en", "kn", "hi"):
+            with _extraction_lock:  # PaddleOCR is not thread-safe
+                list(get_ocr(lang).predict(sample))  # first predict also initialises the kernels
+    except Exception as e:
+        logger.warning("Warm-up: could not preload the OCR engines: %s", e)
+
+    print(f"[startup] Warm-up done in {time.perf_counter() - start:.0f}s (OCR engines and API clients ready).", flush=True)
+
+
+def start_warm_up() -> None:
+    threading.Thread(target=warm_up, name="warm-up", daemon=True).start()
 
 
 def recover_interrupted() -> None:

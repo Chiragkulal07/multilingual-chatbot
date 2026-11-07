@@ -5,6 +5,7 @@ from app.config import EMBEDDING_PROVIDERS
 from app.database import get_conn
 from app.embeddings import EmbeddingError, embed_query
 from app.index_sync import sync_provider
+from app.tracing import annotate, compact, traceable
 
 logger = logging.getLogger("retrieval")
 
@@ -18,6 +19,7 @@ def _indexed_chunk_count() -> int:
         ).fetchone()["n"]
 
 
+@traceable(name="faiss_search_and_fetch", run_type="retriever", process_inputs=compact)
 def _search_provider(provider: str, query_vector, k: int, wanted: set | None) -> list[dict]:
     total = vector_store.total(provider)
     fetch_k = min(total, MAX_FILTER_FETCH) if wanted else k
@@ -56,9 +58,12 @@ def _search_provider(provider: str, query_vector, k: int, wanted: set | None) ->
         )
         if len(results) == k:
             break
+    annotate(provider=provider, fetch_k=fetch_k, index_size=total, hits=len(hits), kept=len(results),
+             top_score=results[0]["score"] if results else None)
     return results
 
 
+@traceable(name="retrieve", run_type="chain")
 def retrieve(question: str, k: int, file_ids: list[str] | None = None) -> list[dict]:
     """Top-k chunks for a question, best first. Optionally limited to certain files.
 
@@ -74,7 +79,9 @@ def retrieve(question: str, k: int, file_ids: list[str] | None = None) -> list[d
 
     for provider in EMBEDDING_PROVIDERS:
         try:
-            if vector_store.total(provider) < chunk_count:
+            behind = vector_store.total(provider) < chunk_count
+            annotate(**{f"{provider}_index_behind": behind, "indexed_chunks": chunk_count})
+            if behind:
                 # This index missed some chunks (provider was down earlier): catch up if we can.
                 try:
                     sync_provider(provider, attempts=1)

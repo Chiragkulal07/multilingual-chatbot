@@ -17,6 +17,7 @@ from app.config import (
     OPENAI_MAX_OUTPUT_TOKENS,
 )
 from app.languages import LANGUAGES, message
+from app.tracing import annotate, traceable, wrap_gemini_client, wrap_openai_client
 
 logger = logging.getLogger("llm")
 
@@ -88,7 +89,7 @@ def _get_client():
             )
         except Exception:
             http = types.HttpOptions(timeout=GEMINI_TIMEOUT_MS)
-        _client = genai.Client(api_key=GEMINI_API_KEY, http_options=http)
+        _client = wrap_gemini_client(genai.Client(api_key=GEMINI_API_KEY, http_options=http))
     return _client
 
 
@@ -101,8 +102,8 @@ def _get_openai_client():
             import openai
         except ImportError:
             raise LLMError("The openai package is not installed. Run: pip install openai", 500)
-        _openai_client = openai.OpenAI(
-            api_key=OPENAI_API_KEY, timeout=GEMINI_TIMEOUT_MS / 1000, max_retries=0
+        _openai_client = wrap_openai_client(
+            openai.OpenAI(api_key=OPENAI_API_KEY, timeout=GEMINI_TIMEOUT_MS / 1000, max_retries=0)
         )
     return _openai_client
 
@@ -164,6 +165,7 @@ def _parse_doc_response(text: str | None, num_chunks: int, answer_lang: str) -> 
     }
 
 
+@traceable(name="gemini_doc_attempt", run_type="chain")
 def _gemini_doc_attempt(model: str, prompt: str, system: str, num_chunks: int, answer_lang: str) -> dict:
     try:
         client = _get_client()
@@ -188,6 +190,7 @@ def _gemini_doc_attempt(model: str, prompt: str, system: str, num_chunks: int, a
         raise _Fail(f"unusable answer: {e}")
 
 
+@traceable(name="gemini_general_attempt", run_type="chain")
 def _gemini_general_attempt(model: str, prompt: str, system: str) -> dict:
     try:
         client = _get_client()
@@ -240,6 +243,7 @@ def _openai_chat_completion(client, **kwargs):
         raise
 
 
+@traceable(name="openai_doc_attempt", run_type="chain")
 def _openai_doc_attempt(system: str, prompt: str, num_chunks: int, answer_lang: str) -> dict:
     try:
         client = _get_openai_client()
@@ -274,6 +278,7 @@ def _openai_doc_attempt(system: str, prompt: str, num_chunks: int, answer_lang: 
         raise _Fail(f"unusable answer: {e}")
 
 
+@traceable(name="openai_general_attempt", run_type="chain")
 def _openai_general_attempt(system: str, prompt: str) -> dict:
     try:
         client = _get_openai_client()
@@ -306,6 +311,7 @@ def _openai_general_attempt(system: str, prompt: str) -> dict:
         raise _Fail(str(e), 504)
 
 
+@traceable(name="generate_answer", run_type="chain")
 def generate_answer(
     question: str,
     chunks: list[dict] | None = None,
@@ -349,12 +355,17 @@ def generate_answer(
         raise LLMError("No language model is available right now. Please check your API configuration.", 429)
 
     last: _Fail | None = None
+    failed = []
     for name, attempt in attempts:
         try:
-            return attempt()
+            result = attempt()
+            annotate(model_used=name, failed_attempts=failed, prompt_chars=len(prompt))
+            return result
         except _Fail as f:
             logger.warning("LLM %s failed: %s %s", name, f.code, f)
+            failed.append(f"{name}: {f.code}")
             last = f
+    annotate(failed_attempts=failed, prompt_chars=len(prompt))
 
     code = last.code if last else None
     if code in (401, 403):

@@ -7,11 +7,13 @@ import logging
 import threading
 
 import numpy as np
+from langsmith.utils import ContextThreadPoolExecutor
 
 from app import vector_store
 from app.config import EMBEDDING_PROVIDERS
 from app.database import get_conn
 from app.embeddings import MAX_ATTEMPTS, EmbeddingError, embed_texts
+from app.tracing import annotate, compact, traceable
 
 logger = logging.getLogger("index_sync")
 
@@ -19,14 +21,20 @@ logger = logging.getLogger("index_sync")
 commit_lock = threading.Lock()
 
 
+@traceable(name="embed_all_providers", run_type="chain", process_inputs=compact, process_outputs=compact)
 def embed_all(texts: list[str]) -> dict[str, np.ndarray]:
     """Embed with every configured provider. Providers that fail are skipped;
     raises only if ALL of them fail."""
     results: dict[str, np.ndarray] = {}
     last_error: EmbeddingError | None = None
-    for provider in EMBEDDING_PROVIDERS:
+    # The providers are independent network calls, so run them at the same time
+    # (upload waits for the slower one instead of the sum of both).
+    # ContextThreadPoolExecutor keeps the LangSmith spans nested under this one.
+    with ContextThreadPoolExecutor(max_workers=max(1, len(EMBEDDING_PROVIDERS))) as pool:
+        futures = {p: pool.submit(embed_texts, texts, p) for p in EMBEDDING_PROVIDERS}
+    for provider, future in futures.items():  # same order as before: primary provider first
         try:
-            results[provider] = embed_texts(texts, provider)
+            results[provider] = future.result()
         except EmbeddingError as e:
             logger.warning("Embedding with %s failed: %s", provider, e)
             last_error = e
@@ -38,6 +46,7 @@ def embed_all(texts: list[str]) -> dict[str, np.ndarray]:
     return results
 
 
+@traceable(name="sync_provider_index", run_type="chain")
 def sync_provider(provider: str, attempts: int = MAX_ATTEMPTS) -> int:
     """Embed every chunk that this provider's index doesn't have yet. Returns how many were added."""
     with get_conn() as conn:
@@ -49,6 +58,7 @@ def sync_provider(provider: str, attempts: int = MAX_ATTEMPTS) -> int:
         ]
     have = vector_store.all_ids(provider)
     missing = [r for r in rows if r["vector_id"] not in have]
+    annotate(index_size=len(have), chunks_in_db=len(rows), missing=len(missing))
     if not missing:
         return 0
 

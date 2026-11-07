@@ -7,7 +7,9 @@ import httpx
 import numpy as np
 from google.genai import errors, types
 
+from app import cache
 from app.config import EMBEDDING_BATCH_SIZE, EMBEDDING_DIM, EMBEDDING_MODELS, EMBEDDING_PROVIDERS
+from app.tracing import annotate, compact, traceable
 from app.llm import LLMError, _get_client as _get_gemini_client, _get_openai_client
 
 logger = logging.getLogger("embeddings")
@@ -88,6 +90,7 @@ def _openai_once(batch: list[str], task_type: str, model: str) -> list[list[floa
 _PROVIDERS = {"gemini": _gemini_once, "openai": _openai_once}
 
 
+@traceable(name="embed_api_call", run_type="embedding", process_inputs=compact, process_outputs=compact)
 def _embed_batch(batch: list[str], task_type: str, provider: str, attempts: int) -> list[list[float]]:
     once = _PROVIDERS[provider]
     model = EMBEDDING_MODELS[provider]
@@ -99,36 +102,64 @@ def _embed_batch(batch: list[str], task_type: str, provider: str, attempts: int)
             if attempt == attempts:
                 raise t.final
             logger.warning("%s embedding attempt %d failed (%s), retrying in %.0fs", provider, attempt, t, delay)
+            annotate(**{f"retry_{attempt}": f"{t} (slept {delay:.0f}s)"})
             time.sleep(delay)
             delay *= 2
             continue
+        annotate(provider=provider, model=model, attempt=attempt, batch_size=len(batch))
         if len(vectors) != len(batch):
             raise EmbeddingError("The provider returned a different number of embeddings than requested.")
         return vectors
     raise EmbeddingError("Could not create embeddings. Please try again.", 502)
 
 
+@traceable(name="embed", run_type="chain", process_inputs=compact, process_outputs=compact)
 def _embed(texts: list[str], task_type: str, provider: str, attempts: int) -> np.ndarray:
     if provider not in _PROVIDERS:
         raise EmbeddingError(f"Unknown embedding provider '{provider}'.", 500)
     if not texts:
         return np.empty((0, EMBEDDING_DIM), dtype="float32")
 
-    rows: list[list[float]] = []
-    for i in range(0, len(texts), EMBEDDING_BATCH_SIZE):
-        rows.extend(_embed_batch(texts[i : i + EMBEDDING_BATCH_SIZE], task_type, provider, attempts))
+    # Reuse vectors computed before; only call the API for texts we have never embedded.
+    try:
+        cached = cache.get_embeddings(provider, task_type, texts)
+    except Exception as e:  # a cache problem must never break embedding
+        logger.warning("Embedding cache read failed: %s", e)
+        cached = {}
+    missing_idx = [i for i in range(len(texts)) if i not in cached]
+    missing = [texts[i] for i in missing_idx]
+    annotate(provider=provider, task_type=task_type, cache_hits=len(cached), cache_misses=len(missing))
 
-    vectors = np.asarray(rows, dtype="float32")
-    if vectors.shape != (len(texts), EMBEDDING_DIM):
+    rows: list[list[float]] = []
+    for i in range(0, len(missing), EMBEDDING_BATCH_SIZE):
+        rows.extend(_embed_batch(missing[i : i + EMBEDDING_BATCH_SIZE], task_type, provider, attempts))
+
+    fresh = np.asarray(rows, dtype="float32").reshape(-1, EMBEDDING_DIM) if rows else np.empty((0, EMBEDDING_DIM), "float32")
+    if fresh.shape != (len(missing), EMBEDDING_DIM):
         raise EmbeddingError(
-            f"Expected embeddings of shape {(len(texts), EMBEDDING_DIM)} but got {vectors.shape}. "
+            f"Expected embeddings of shape {(len(missing), EMBEDDING_DIM)} but got {fresh.shape}. "
             "Check EMBEDDING_DIM.", 500,
         )
 
     # Reduced sizes may not be unit length, and the FAISS indexes use inner product (cosine).
-    norms = np.linalg.norm(vectors, axis=1, keepdims=True)
+    norms = np.linalg.norm(fresh, axis=1, keepdims=True)
     norms[norms == 0] = 1.0
-    return np.ascontiguousarray(vectors / norms, dtype="float32")
+    fresh = fresh / norms
+
+    if missing:
+        try:
+            cache.put_embeddings(provider, task_type, missing, fresh)
+        except Exception as e:
+            logger.warning("Embedding cache write failed: %s", e)
+        if cached:
+            logger.info("%s embeddings: %d cached, %d new", provider, len(cached), len(missing))
+
+    vectors = np.empty((len(texts), EMBEDDING_DIM), dtype="float32")
+    for i, v in cached.items():
+        vectors[i] = v
+    for j, i in enumerate(missing_idx):
+        vectors[i] = fresh[j]
+    return np.ascontiguousarray(vectors, dtype="float32")
 
 
 def embed_texts(texts: list[str], provider: str | None = None, attempts: int = MAX_ATTEMPTS) -> np.ndarray:
