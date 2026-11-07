@@ -1,4 +1,8 @@
-const API_BASE = "http://localhost:8000";
+// Backend URL comes from the env file Vite picks for the current mode:
+//   npm run dev   -> .env.development (local backend)
+//   npm run build -> .env.production  (cloud backend)
+// Vite only exposes variables prefixed with VITE_, via import.meta.env (process.env does not exist in the browser).
+const API_BASE = (import.meta.env.VITE_API_URL || "http://localhost:8000").replace(/\/+$/, "");
 
 async function parseError(res, fallback) {
   try {

@@ -14,7 +14,12 @@ FAISS_INDEX_PATH = BASE_DIR / "storage" / "faiss.index"
 
 MAX_FILE_SIZE = 10 * 1024 * 1024  # 10 MB per file
 ALLOWED_EXTENSIONS = {".jpg", ".jpeg", ".png", ".pdf"}
-CORS_ORIGINS = ["http://localhost:5173"]
+# Frontend URLs allowed to call this API (comma-separated). Add your deployed frontend URL in .env.
+CORS_ORIGINS = [
+    o.strip().rstrip("/")
+    for o in os.getenv("CORS_ORIGINS", "http://localhost:5173").split(",")
+    if o.strip()
+]
 
 # Chunking
 CHUNK_SIZE_TOKENS = 400
