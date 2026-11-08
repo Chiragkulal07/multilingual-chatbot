@@ -37,7 +37,7 @@ app = FastAPI(title="OCR RAG Chatbot", lifespan=lifespan)
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=CORS_ORIGINS,
+    allow_origins="https://multilingual-chatbot-52ob.onrender.com",
     allow_methods=["*"],
     allow_headers=["*"],
 )

@@ -1,4 +1,6 @@
+# Environment files (local only, never commit)
 .env
+.env.*
 venv/
 storage/
 __pycache__/
