@@ -1,4 +1,5 @@
 import logging
+import os
 import threading
 import time
 
@@ -234,9 +235,12 @@ def warm_up() -> None:
 
         sample = np.full((64, 320, 3), 255, dtype=np.uint8)
         cv2.putText(sample, "Warm up 123", (8, 44), cv2.FONT_HERSHEY_SIMPLEX, 1.2, (0, 0, 0), 2)
-        # English first: every upload in "auto" mode starts with it. Kannada and Hindi are
-        # tried in auto mode when the English result is weak, so load them too.
-        for lang in ("en", "kn", "hi"):
+        # English only by default: every upload in "auto" mode starts with it. Each extra
+        # engine costs a few hundred MB of RAM, too much for small cloud instances; Kannada
+        # and Hindi load on first use instead (~3-5 s once). On a machine with spare memory,
+        # set OCR_WARMUP_LANGS=en,kn,hi to preload them as well.
+        langs = [l.strip() for l in os.getenv("OCR_WARMUP_LANGS", "en").split(",") if l.strip()]
+        for lang in langs:
             with _extraction_lock:  # PaddleOCR is not thread-safe
                 list(get_ocr(lang).predict(sample))  # first predict also initialises the kernels
     except Exception as e:

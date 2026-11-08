@@ -40,13 +40,13 @@ app.add_middleware(
     allow_origins=[
         "http://localhost:3000",
         "http://localhost:5173",
-        "https://multilingual-chatbot-git-main-chiragkulal07s-projects.vercel.app",
+        "https://multilingual-chatbot-livid.vercel.app",
     ],
+    allow_origin_regex=r"https://multilingual-chatbot.*\.vercel\.app",
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
-
 timing_log = logging.getLogger("uvicorn.error")
 
 
